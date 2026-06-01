@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "triangle-ops"
+version = "0.1.0"
+description = "Fused Triton kernels for AlphaFold-3 Pairformer primitives (attention-pair-bias, triangle attention, triangle multiplicative update). Drop-in replacements for cuequivariance, tuned to beat it on H100."
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.3",
+    "triton>=3.0",
+]
+
+[project.optional-dependencies]
+# Benchmarks compare against cuequivariance + produce plots; not needed to use the kernels.
+bench = ["cuequivariance-torch", "matplotlib", "pyyaml"]
+test = ["pytest"]
+
+[tool.setuptools.packages.find]
+include = ["triangle_ops*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
