@@ -9,8 +9,8 @@ queries (each row i masks over its N key positions).
 
 import torch
 
-from .._common.ln_absorption import absorb_ln_matmul
 from .._common.layouts import interleave_kv
+from .._common.ln_absorption import absorb_ln_matmul
 from .kernel import triangle_attn_forward
 
 
@@ -28,14 +28,21 @@ def precompute(W_ln, B_ln, WQ, WK, WV, W_proj_z, B_proj_z, H, D):
 
     # bias proj: fold LN, transpose to (H, C_in) for the kernel, add B_proj_z.
     WZ_c_f32, sWZ, BZ_const = absorb_ln_matmul(W_proj_z, W_ln, B_ln, weight_dtype=torch.float32)
-    WZ_c = WZ_c_f32.t().contiguous()                       # (C_in, H) -> (H, C_in)
+    WZ_c = WZ_c_f32.t().contiguous()  # (C_in, H) -> (H, C_in)
     BZ_const = (BZ_const + B_proj_z.float()).contiguous()
 
     return {
-        "WQ_c": WQ_c, "sWQ": sWQ, "BQ_const": BQ_const,
-        "WKV_c": WKV_c, "sWK": sWK, "sWV": sWV,
-        "BK_const": BK_const, "BV_const": BV_const,
-        "WZ_c": WZ_c, "sWZ": sWZ, "BZ_const": BZ_const,
+        "WQ_c": WQ_c,
+        "sWQ": sWQ,
+        "BQ_const": BQ_const,
+        "WKV_c": WKV_c,
+        "sWK": sWK,
+        "sWV": sWV,
+        "BK_const": BK_const,
+        "BV_const": BV_const,
+        "WZ_c": WZ_c,
+        "sWZ": sWZ,
+        "BZ_const": BZ_const,
     }
 
 
@@ -48,8 +55,7 @@ def _wrap_up(x_gate_in, O_attn, W_proj_g, B_proj_g, W_proj_o, B_proj_o, H, D):
     return torch.nn.functional.linear(o, W_proj_o, B_proj_o)
 
 
-def forward(X, pre, *, mask=None, scale=1.0, eps=1e-5,
-            W_proj_g, B_proj_g, W_proj_o, B_proj_o):
+def forward(X, pre, *, mask=None, scale=1.0, eps=1e-5, W_proj_g, B_proj_g, W_proj_o, B_proj_o):
     """Per-call forward using precomputed weights `pre`.  X is (N, N, C_in);
     returns (N, N, C_in)."""
     N = X.shape[0]
@@ -58,22 +64,55 @@ def forward(X, pre, *, mask=None, scale=1.0, eps=1e-5,
     O_attn = torch.empty(N, N, H * D, device=X.device, dtype=X.dtype)
     triangle_attn_forward(
         X,
-        pre["WQ_c"], pre["sWQ"], pre["BQ_const"],
-        pre["WKV_c"], pre["sWK"], pre["sWV"], pre["BK_const"], pre["BV_const"],
-        pre["WZ_c"], pre["sWZ"], pre["BZ_const"],
-        O_attn, scale=scale, eps=eps, mask=mask,
+        pre["WQ_c"],
+        pre["sWQ"],
+        pre["BQ_const"],
+        pre["WKV_c"],
+        pre["sWK"],
+        pre["sWV"],
+        pre["BK_const"],
+        pre["BV_const"],
+        pre["WZ_c"],
+        pre["sWZ"],
+        pre["BZ_const"],
+        O_attn,
+        scale=scale,
+        eps=eps,
+        mask=mask,
     )
     return _wrap_up(X, O_attn, W_proj_g, B_proj_g, W_proj_o, B_proj_o, H, D)
 
 
 def triangle_attention(
-    X, W_ln, B_ln, WQ, WK, WV, W_proj_z, B_proj_z,
-    W_proj_g, B_proj_g, W_proj_o, B_proj_o,
-    H, D, scale=1.0, eps=1e-5, mask=None,
+    X,
+    W_ln,
+    B_ln,
+    WQ,
+    WK,
+    WV,
+    W_proj_z,
+    B_proj_z,
+    W_proj_g,
+    B_proj_g,
+    W_proj_o,
+    B_proj_o,
+    H,
+    D,
+    scale=1.0,
+    eps=1e-5,
+    mask=None,
 ):
     """End-to-end one-shot (precompute INCLUDED). For amortized latency, call
     `precompute` once and `forward` each step."""
     pre = precompute(W_ln, B_ln, WQ, WK, WV, W_proj_z, B_proj_z, H, D)
-    return forward(X, pre, mask=mask, scale=scale, eps=eps,
-                   W_proj_g=W_proj_g, B_proj_g=B_proj_g,
-                   W_proj_o=W_proj_o, B_proj_o=B_proj_o)
+    return forward(
+        X,
+        pre,
+        mask=mask,
+        scale=scale,
+        eps=eps,
+        W_proj_g=W_proj_g,
+        B_proj_g=B_proj_g,
+        W_proj_o=W_proj_o,
+        B_proj_o=B_proj_o,
+    )

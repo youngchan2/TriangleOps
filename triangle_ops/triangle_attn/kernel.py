@@ -17,9 +17,9 @@ Naming follows the triangle_mul kernel style: `_stride{0,1,2}` for strides,
 `_offs` for index ranges, `_fp32` for float casts, `_mask` for masks, `Out` tile.
 """
 
+import torch
 import triton
 import triton.language as tl
-import torch
 
 from .._common.dtype import tl_io_dtype
 
@@ -29,23 +29,33 @@ from .._common.dtype import tl_io_dtype
 # ===========================================================================
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_QK': 32},  num_warps=2, num_stages=2),
-        triton.Config({'BLOCK_QK': 64},  num_warps=2, num_stages=2),
-        triton.Config({'BLOCK_QK': 64},  num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_QK': 128}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_QK': 128}, num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_QK': 256}, num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_QK': 256}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_QK": 32}, num_warps=2, num_stages=2),
+        triton.Config({"BLOCK_QK": 64}, num_warps=2, num_stages=2),
+        triton.Config({"BLOCK_QK": 64}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_QK": 128}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_QK": 128}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_QK": 256}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_QK": 256}, num_warps=4, num_stages=2),
     ],
-    key=['N', 'C_in', 'H'],
+    key=["N", "C_in", "H"],
 )
 @triton.jit
 def bias_proj_kernel(
-    X_ptr, X_stride0, X_stride1, X_stride2,
-    WZ_ptr, WZ_stride0, WZ_stride1,
-    sWZ_ptr, sWZ_stride0,
-    BZc_ptr, BZc_stride0,
-    Bias_ptr, Bias_stride0, Bias_stride1, Bias_stride2,
+    X_ptr,
+    X_stride0,
+    X_stride1,
+    X_stride2,
+    WZ_ptr,
+    WZ_stride0,
+    WZ_stride1,
+    sWZ_ptr,
+    sWZ_stride0,
+    BZc_ptr,
+    BZc_stride0,
+    Bias_ptr,
+    Bias_stride0,
+    Bias_stride1,
+    Bias_stride2,
     N: tl.constexpr,
     C_in: tl.constexpr,
     H: tl.constexpr,
@@ -67,7 +77,8 @@ def bias_proj_kernel(
 
     X_tile = tl.load(
         X_ptr + q_idx[:, None] * X_stride0 + k_idx[:, None] * X_stride1 + c_offs[None, :] * X_stride2,
-        mask=qk_mask[:, None], other=0.0,
+        mask=qk_mask[:, None],
+        other=0.0,
     )
     X_fp32 = X_tile.to(tl.float32)
 
@@ -96,34 +107,55 @@ def bias_proj_kernel(
 # ===========================================================================
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_M': 16,  'BLOCK_K': 32}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 16,  'BLOCK_K': 64}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 32,  'BLOCK_K': 32}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 32,  'BLOCK_K': 64}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 32,  'BLOCK_K': 32}, num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_M': 64,  'BLOCK_K': 32}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 64,  'BLOCK_K': 64}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 64,  'BLOCK_K': 64}, num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_K': 32}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_K': 64}, num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_K': 32}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_M": 16, "BLOCK_K": 32}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 16, "BLOCK_K": 64}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 32, "BLOCK_K": 32}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 32, "BLOCK_K": 64}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 32, "BLOCK_K": 32}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_M": 64, "BLOCK_K": 32}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 64, "BLOCK_K": 64}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 64, "BLOCK_K": 64}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_M": 128, "BLOCK_K": 32}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 128, "BLOCK_K": 64}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_M": 128, "BLOCK_K": 32}, num_warps=8, num_stages=2),
     ],
-    key=['N', 'C_in', 'H', 'D'],
+    key=["N", "C_in", "H", "D"],
 )
 @triton.jit
 def triangle_attn_kernel(
-    X_ptr, X_stride0, X_stride1, X_stride2,
-    WQ_ptr, WQ_stride0, WQ_stride1,           # (C_in, H*D)
-    WKV_ptr, WKV_stride0, WKV_stride1,        # (C_in, 2*H*D) feature-interleaved per head
-    sWQ_ptr, sWQ_stride0,
-    sWK_ptr, sWK_stride0,
-    sWV_ptr, sWV_stride0,
-    BQc_ptr, BQc_stride0,
-    BKc_ptr, BKc_stride0,
-    BVc_ptr, BVc_stride0,
-    Bias_ptr, Bias_stride0, Bias_stride1, Bias_stride2,    # (H, N, N)
-    Mask_ptr, Mask_stride0, Mask_stride1,
-    O_ptr, O_stride0, O_stride1, O_stride2,   # (N, N, H*D)
+    X_ptr,
+    X_stride0,
+    X_stride1,
+    X_stride2,
+    WQ_ptr,
+    WQ_stride0,
+    WQ_stride1,  # (C_in, H*D)
+    WKV_ptr,
+    WKV_stride0,
+    WKV_stride1,  # (C_in, 2*H*D) feature-interleaved per head
+    sWQ_ptr,
+    sWQ_stride0,
+    sWK_ptr,
+    sWK_stride0,
+    sWV_ptr,
+    sWV_stride0,
+    BQc_ptr,
+    BQc_stride0,
+    BKc_ptr,
+    BKc_stride0,
+    BVc_ptr,
+    BVc_stride0,
+    Bias_ptr,
+    Bias_stride0,
+    Bias_stride1,
+    Bias_stride2,  # (H, N, N)
+    Mask_ptr,
+    Mask_stride0,
+    Mask_stride1,
+    O_ptr,
+    O_stride0,
+    O_stride1,
+    O_stride2,  # (N, N, H*D)
     N: tl.constexpr,
     C_in: tl.constexpr,
     H: tl.constexpr,
@@ -151,7 +183,8 @@ def triangle_attn_kernel(
 
     X_q = tl.load(
         X_ptr + pid_n * X_stride0 + q_offs[:, None] * X_stride1 + c_offs[None, :] * X_stride2,
-        mask=q_mask[:, None], other=0.0,
+        mask=q_mask[:, None],
+        other=0.0,
     )
     X_q_fp32 = X_q.to(tl.float32)
     mean_q = tl.sum(X_q_fp32, axis=-1) * inv_C
@@ -172,7 +205,7 @@ def triangle_attn_kernel(
     Q = rstd_q[:, None] * (Q_acc - mean_q[:, None] * sWQ_h[None, :]) + BQc_h[None, :]
     Q_scaled = (Q * SCALE).to(IO_DTYPE)
 
-    m_i = tl.full((BLOCK_M,), -float('inf'), dtype=tl.float32)
+    m_i = tl.full((BLOCK_M,), -float("inf"), dtype=tl.float32)
     l_i = tl.zeros((BLOCK_M,), dtype=tl.float32)
     O_acc = tl.zeros((BLOCK_M, D), dtype=tl.float32)
 
@@ -182,7 +215,8 @@ def triangle_attn_kernel(
 
         X_k = tl.load(
             X_ptr + pid_n * X_stride0 + k_offs[:, None] * X_stride1 + c_offs[None, :] * X_stride2,
-            mask=k_mask[:, None], other=0.0,
+            mask=k_mask[:, None],
+            other=0.0,
         )
         X_k_fp32 = X_k.to(tl.float32)
         mean_k = tl.sum(X_k_fp32, axis=-1) * inv_C
@@ -190,9 +224,9 @@ def triangle_attn_kernel(
         var_k = tl.sum(diff_k * diff_k, axis=-1) * inv_C
         rstd_k = 1.0 / tl.sqrt(var_k + EPS)
 
-        KV_acc = tl.dot(X_k, WKV_h)                                                    # (BLOCK_K, 2*D)
+        KV_acc = tl.dot(X_k, WKV_h)  # (BLOCK_K, 2*D)
         KV_3d = tl.reshape(KV_acc, (BLOCK_K, D, 2))
-        K_acc, V_acc = tl.split(KV_3d)                                                 # each (BLOCK_K, D)
+        K_acc, V_acc = tl.split(KV_3d)  # each (BLOCK_K, D)
         K_block = (rstd_k[:, None] * (K_acc - mean_k[:, None] * sWK_h[None, :]) + BKc_h[None, :]).to(IO_DTYPE)
         V_block = (rstd_k[:, None] * (V_acc - mean_k[:, None] * sWV_h[None, :]) + BVc_h[None, :]).to(IO_DTYPE)
 
@@ -200,18 +234,20 @@ def triangle_attn_kernel(
 
         bias_tile = tl.load(
             Bias_ptr + pid_h * Bias_stride0 + q_offs[:, None] * Bias_stride1 + k_offs[None, :] * Bias_stride2,
-            mask=(q_mask[:, None] & k_mask[None, :]), other=0.0,
+            mask=(q_mask[:, None] & k_mask[None, :]),
+            other=0.0,
         ).to(tl.float32)
         S = S + bias_tile
 
         if HAS_MASK:
             mask_row = tl.load(
                 Mask_ptr + pid_n * Mask_stride0 + k_offs * Mask_stride1,
-                mask=k_mask, other=0,
+                mask=k_mask,
+                other=0,
             )
             mask_bias = tl.where(mask_row != 0, 0.0, NEG_INF)
             S = S + mask_bias[None, :]
-        S = tl.where(k_mask[None, :], S, -float('inf'))
+        S = tl.where(k_mask[None, :], S, -float("inf"))
 
         m_new = tl.maximum(m_i, tl.max(S, axis=1))
         alpha = tl.exp(m_i - m_new)
@@ -231,57 +267,113 @@ def triangle_attn_kernel(
 
 def triangle_attn_forward(
     X,
-    WQ_c, sWQ, BQ_const,
-    WKV_c, sWK, sWV, BK_const, BV_const,
-    WZ_c, sWZ, BZ_const,
-    O,
-    scale=1.0, eps=1e-5, mask=None, Bias_buf=None,
+    WQ_c,
+    sWQ,
+    BQ_const,
+    WKV_c,
+    sWK,
+    sWV,
+    BK_const,
+    BV_const,
+    WZ_c,
+    sWZ,
+    BZ_const,
+    out,
+    scale=1.0,
+    eps=1e-5,
+    mask=None,
+    Bias_buf=None,
 ):
-    """Launch bias_proj_kernel + triangle_attn_kernel; write into O (N, N, H*D)."""
+    """Launch bias_proj_kernel + triangle_attn_kernel; write into out (N, N, H*D)."""
     N, N2, C_in = X.shape
     assert N == N2
     H = sWZ.shape[0]
     D = WQ_c.shape[1] // H
     assert WKV_c.shape == (C_in, 2 * H * D)
-    assert O.shape == (N, N, H * D)
+    assert out.shape == (N, N, H * D)
 
     io_dtype = tl_io_dtype(X.dtype)
     if Bias_buf is None:
         Bias_buf = torch.empty(H, N, N, device=X.device, dtype=X.dtype)
 
-    grid_b = lambda meta: (triton.cdiv(N * N, meta['BLOCK_QK']), H)
+    grid_b = lambda meta: (triton.cdiv(N * N, meta["BLOCK_QK"]), H)
     bias_proj_kernel[grid_b](
-        X, X.stride(0), X.stride(1), X.stride(2),
-        WZ_c, WZ_c.stride(0), WZ_c.stride(1),
-        sWZ, sWZ.stride(0),
-        BZ_const, BZ_const.stride(0),
-        Bias_buf, Bias_buf.stride(0), Bias_buf.stride(1), Bias_buf.stride(2),
-        N=N, C_in=C_in, H=H, EPS=eps, IO_DTYPE=io_dtype,
+        X,
+        X.stride(0),
+        X.stride(1),
+        X.stride(2),
+        WZ_c,
+        WZ_c.stride(0),
+        WZ_c.stride(1),
+        sWZ,
+        sWZ.stride(0),
+        BZ_const,
+        BZ_const.stride(0),
+        Bias_buf,
+        Bias_buf.stride(0),
+        Bias_buf.stride(1),
+        Bias_buf.stride(2),
+        N=N,
+        C_in=C_in,
+        H=H,
+        EPS=eps,
+        IO_DTYPE=io_dtype,
     )
 
     has_mask = mask is not None
     if has_mask:
         mask_i8 = mask.to(torch.int8).contiguous()
-        mask_ptr, mask_stride0, mask_stride1 = mask_i8, mask_i8.stride(0), mask_i8.stride(1)
+        mask_ptr, mask_stride0, mask_stride1 = (
+            mask_i8,
+            mask_i8.stride(0),
+            mask_i8.stride(1),
+        )
     else:
         mask_ptr, mask_stride0, mask_stride1 = X, 0, 0
 
-    grid_a = lambda meta: (N, H, triton.cdiv(N, meta['BLOCK_M']))
+    grid_a = lambda meta: (N, H, triton.cdiv(N, meta["BLOCK_M"]))
     triangle_attn_kernel[grid_a](
-        X, X.stride(0), X.stride(1), X.stride(2),
-        WQ_c, WQ_c.stride(0), WQ_c.stride(1),
-        WKV_c, WKV_c.stride(0), WKV_c.stride(1),
-        sWQ, sWQ.stride(0),
-        sWK, sWK.stride(0),
-        sWV, sWV.stride(0),
-        BQ_const, BQ_const.stride(0),
-        BK_const, BK_const.stride(0),
-        BV_const, BV_const.stride(0),
-        Bias_buf, Bias_buf.stride(0), Bias_buf.stride(1), Bias_buf.stride(2),
-        mask_ptr, mask_stride0, mask_stride1,
-        O, O.stride(0), O.stride(1), O.stride(2),
-        N=N, C_in=C_in, H=H, D=D,
-        SCALE=scale, EPS=eps, NEG_INF=-1e9,
-        HAS_MASK=has_mask, IO_DTYPE=io_dtype,
+        X,
+        X.stride(0),
+        X.stride(1),
+        X.stride(2),
+        WQ_c,
+        WQ_c.stride(0),
+        WQ_c.stride(1),
+        WKV_c,
+        WKV_c.stride(0),
+        WKV_c.stride(1),
+        sWQ,
+        sWQ.stride(0),
+        sWK,
+        sWK.stride(0),
+        sWV,
+        sWV.stride(0),
+        BQ_const,
+        BQ_const.stride(0),
+        BK_const,
+        BK_const.stride(0),
+        BV_const,
+        BV_const.stride(0),
+        Bias_buf,
+        Bias_buf.stride(0),
+        Bias_buf.stride(1),
+        Bias_buf.stride(2),
+        mask_ptr,
+        mask_stride0,
+        mask_stride1,
+        out,
+        out.stride(0),
+        out.stride(1),
+        out.stride(2),
+        N=N,
+        C_in=C_in,
+        H=H,
+        D=D,
+        SCALE=scale,
+        EPS=eps,
+        NEG_INF=-1e9,
+        HAS_MASK=has_mask,
+        IO_DTYPE=io_dtype,
     )
-    return O
+    return out

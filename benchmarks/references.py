@@ -11,7 +11,6 @@ attention_pair_bias M≤100 (pair size M²≤10000) are NOT the optimized kernel
 All benchmark points at/above 128 use the optimized cuequiv kernels.
 """
 
-import math
 import torch
 import torch.nn.functional as F
 
@@ -19,36 +18,90 @@ import torch.nn.functional as F
 # --------------------------------------------------------------------------- #
 # cuequivariance
 # --------------------------------------------------------------------------- #
-def cueq_attn_pair_bias(X, WQ, WK, WV, Z, W_ln, B_ln, W_proj_z, B_proj_z,
-                        W_proj_g, B_proj_g, W_proj_o, B_proj_o, H, D, scale=1.0, eps=1e-5):
+def cueq_attn_pair_bias(
+    X,
+    WQ,
+    WK,
+    WV,
+    Z,
+    W_ln,
+    B_ln,
+    W_proj_z,
+    B_proj_z,
+    W_proj_g,
+    B_proj_g,
+    W_proj_o,
+    B_proj_o,
+    H,
+    D,
+    scale=1.0,
+    eps=1e-5,
+):
     from cuequivariance_torch.primitives.triangle import attention_pair_bias as cueq_apb
+
     M, N = X.shape
     q = (X @ WQ).reshape(M, H, D).permute(1, 0, 2).contiguous()
     k = (X @ WK).reshape(M, H, D).permute(1, 0, 2).contiguous()
     v = (X @ WV).reshape(M, H, D).permute(1, 0, 2).contiguous()
     mask = torch.ones(1, M, device=X.device, dtype=torch.bool)
     out, _ = cueq_apb(
-        s=X.unsqueeze(0), q=q.unsqueeze(0), k=k.unsqueeze(0), v=v.unsqueeze(0),
-        z=Z.unsqueeze(0), mask=mask, num_heads=H,
-        w_proj_z=W_proj_z.t().contiguous(), w_proj_g=W_proj_g, w_proj_o=W_proj_o,
-        w_ln_z=W_ln, b_ln_z=B_ln, b_proj_z=B_proj_z, b_proj_g=B_proj_g, b_proj_o=B_proj_o,
-        eps=eps, attn_scale=scale, return_z_proj=False,
+        s=X.unsqueeze(0),
+        q=q.unsqueeze(0),
+        k=k.unsqueeze(0),
+        v=v.unsqueeze(0),
+        z=Z.unsqueeze(0),
+        mask=mask,
+        num_heads=H,
+        w_proj_z=W_proj_z.t().contiguous(),
+        w_proj_g=W_proj_g,
+        w_proj_o=W_proj_o,
+        w_ln_z=W_ln,
+        b_ln_z=B_ln,
+        b_proj_z=B_proj_z,
+        b_proj_g=B_proj_g,
+        b_proj_o=B_proj_o,
+        eps=eps,
+        attn_scale=scale,
+        return_z_proj=False,
     )
     return out[0].to(X.dtype)
 
 
-def cueq_triangle_attention(X, W_ln, B_ln, WQ, WK, WV, W_proj_z, B_proj_z,
-                            W_proj_g, B_proj_g, W_proj_o, B_proj_o, H, D,
-                            scale=1.0, eps=1e-5, mask=None):
+def cueq_triangle_attention(
+    X,
+    W_ln,
+    B_ln,
+    WQ,
+    WK,
+    WV,
+    W_proj_z,
+    B_proj_z,
+    W_proj_g,
+    B_proj_g,
+    W_proj_o,
+    B_proj_o,
+    H,
+    D,
+    scale=1.0,
+    eps=1e-5,
+    mask=None,
+):
     from cuequivariance_torch.primitives.triangle import triangle_attention as cueq_tri
+
     N, _, Cin = X.shape
     xln = F.layer_norm(X, (Cin,), W_ln, B_ln, eps=eps)
     q = (xln @ WQ).view(N, N, H, D).permute(0, 2, 1, 3).contiguous()
     k = (xln @ WK).view(N, N, H, D).permute(0, 2, 1, 3).contiguous()
     v = (xln @ WV).view(N, N, H, D).permute(0, 2, 1, 3).contiguous()
-    bp = (xln @ W_proj_z + B_proj_z).permute(2, 0, 1).unsqueeze(0)        # (1, H, N, N)
-    out = cueq_tri(q.unsqueeze(0), k.unsqueeze(0), v.unsqueeze(0),
-                   bp.unsqueeze(0), mask=None, scale=scale)
+    bp = (xln @ W_proj_z + B_proj_z).permute(2, 0, 1).unsqueeze(0)  # (1, H, N, N)
+    out = cueq_tri(
+        q.unsqueeze(0),
+        k.unsqueeze(0),
+        v.unsqueeze(0),
+        bp.unsqueeze(0),
+        mask=None,
+        scale=scale,
+    )
     if isinstance(out, tuple):
         out = out[0]
     out = out.squeeze(0) if out.dim() == 5 else out
@@ -59,21 +112,48 @@ def cueq_triangle_attention(X, W_ln, B_ln, WQ, WK, WV, W_proj_z, B_proj_z,
 
 
 def cueq_triangle_multiplicative_update(x, *, direction, mask=None, eps=1e-5, **w):
-    from cuequivariance_torch.primitives.triangle import triangle_multiplicative_update as cueq_tmu
+    from cuequivariance_torch.primitives.triangle import (
+        triangle_multiplicative_update as cueq_tmu,
+    )
+
     return cueq_tmu(
-        x, direction=direction, mask=mask,
-        norm_in_weight=w["norm_in_weight"], norm_in_bias=w["norm_in_bias"],
-        p_in_weight=w["p_in_weight"], g_in_weight=w["g_in_weight"],
-        norm_out_weight=w["norm_out_weight"], norm_out_bias=w["norm_out_bias"],
-        p_out_weight=w["p_out_weight"], g_out_weight=w["g_out_weight"], eps=eps,
+        x,
+        direction=direction,
+        mask=mask,
+        norm_in_weight=w["norm_in_weight"],
+        norm_in_bias=w["norm_in_bias"],
+        p_in_weight=w["p_in_weight"],
+        g_in_weight=w["g_in_weight"],
+        norm_out_weight=w["norm_out_weight"],
+        norm_out_bias=w["norm_out_bias"],
+        p_out_weight=w["p_out_weight"],
+        g_out_weight=w["g_out_weight"],
+        eps=eps,
     )
 
 
 # --------------------------------------------------------------------------- #
 # pure torch (bf16) — same-dtype path, for a "no fused kernel" baseline
 # --------------------------------------------------------------------------- #
-def torch_attn_pair_bias(X, WQ, WK, WV, Z, W_ln, B_ln, W_proj_z, B_proj_z,
-                         W_proj_g, B_proj_g, W_proj_o, B_proj_o, H, D, scale=1.0, eps=1e-5):
+def torch_attn_pair_bias(
+    X,
+    WQ,
+    WK,
+    WV,
+    Z,
+    W_ln,
+    B_ln,
+    W_proj_z,
+    B_proj_z,
+    W_proj_g,
+    B_proj_g,
+    W_proj_o,
+    B_proj_o,
+    H,
+    D,
+    scale=1.0,
+    eps=1e-5,
+):
     M, N = X.shape
     Cz = Z.shape[-1]
     q = (X @ WQ).reshape(M, H, D).permute(1, 0, 2)
@@ -86,9 +166,25 @@ def torch_attn_pair_bias(X, WQ, WK, WV, Z, W_ln, B_ln, W_proj_z, B_proj_z,
     return F.linear(g * o, W_proj_o, B_proj_o)
 
 
-def torch_triangle_attention(X, W_ln, B_ln, WQ, WK, WV, W_proj_z, B_proj_z,
-                             W_proj_g, B_proj_g, W_proj_o, B_proj_o, H, D,
-                             scale=1.0, eps=1e-5, mask=None):
+def torch_triangle_attention(
+    X,
+    W_ln,
+    B_ln,
+    WQ,
+    WK,
+    WV,
+    W_proj_z,
+    B_proj_z,
+    W_proj_g,
+    B_proj_g,
+    W_proj_o,
+    B_proj_o,
+    H,
+    D,
+    scale=1.0,
+    eps=1e-5,
+    mask=None,
+):
     N, _, Cin = X.shape
     xln = F.layer_norm(X, (Cin,), W_ln, B_ln, eps=eps)
     q = (xln @ WQ).view(N, N, H, D).permute(0, 2, 1, 3)

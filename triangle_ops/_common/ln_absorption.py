@@ -25,29 +25,39 @@ Both return ΣW and Bc in fp32 (they feed fp32 accumulators); Wc is cast to
 import torch
 
 
-def absorb_ln(weight: torch.Tensor, w_ln: torch.Tensor, b_ln: torch.Tensor,
-              *, weight_dtype: torch.dtype | None = None):
+def absorb_ln(
+    weight: torch.Tensor,
+    w_ln: torch.Tensor,
+    b_ln: torch.Tensor,
+    *,
+    weight_dtype: torch.dtype | None = None,
+):
     """Fold LN affine into an (out, in) nn.Linear-convention weight.
 
     Returns: Wc (out, in)[weight_dtype], sum_W (out,)[fp32], B_const (out,)[fp32].
     """
     Wf = weight.float()
-    Wc = Wf * w_ln.float().unsqueeze(0)            # (out, in)
-    sum_W = Wc.sum(dim=1).contiguous()             # (out,)
-    B_const = (Wf @ b_ln.float()).contiguous()     # (out,)
+    Wc = Wf * w_ln.float().unsqueeze(0)  # (out, in)
+    sum_W = Wc.sum(dim=1).contiguous()  # (out,)
+    B_const = (Wf @ b_ln.float()).contiguous()  # (out,)
     wd = weight_dtype if weight_dtype is not None else weight.dtype
     return Wc.to(wd).contiguous(), sum_W, B_const
 
 
-def absorb_ln_matmul(weight: torch.Tensor, w_ln: torch.Tensor, b_ln: torch.Tensor,
-                     *, weight_dtype: torch.dtype | None = None):
+def absorb_ln_matmul(
+    weight: torch.Tensor,
+    w_ln: torch.Tensor,
+    b_ln: torch.Tensor,
+    *,
+    weight_dtype: torch.dtype | None = None,
+):
     """Fold LN affine into an (in, out) matmul-convention weight (y = LN(x) @ W).
 
     Returns: Wc (in, out)[weight_dtype], sum_W (out,)[fp32], B_const (out,)[fp32].
     """
     Wf = weight.float()
-    Wc = Wf * w_ln.float().unsqueeze(-1)           # (in, out)
-    sum_W = Wc.sum(dim=0).contiguous()             # (out,)
-    B_const = (b_ln.float() @ Wf).contiguous()     # (out,)
+    Wc = Wf * w_ln.float().unsqueeze(-1)  # (in, out)
+    sum_W = Wc.sum(dim=0).contiguous()  # (out,)
+    B_const = (b_ln.float() @ Wf).contiguous()  # (out,)
     wd = weight_dtype if weight_dtype is not None else weight.dtype
     return Wc.to(wd).contiguous(), sum_W, B_const

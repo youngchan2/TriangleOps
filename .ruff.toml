@@ -1,0 +1,12 @@
+# Same lint rules as the K-Fold repo, but line-length=120: the Triton kernels
+# carry long elementwise / LN-absorption expressions that read worse wrapped at 90.
+line-length = 120
+indent-width = 4
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "B", "UP", "I", "T203"]
+# E731: `grid = lambda meta: ...` is the idiomatic Triton kernel-launch pattern.
+ignore = ["B006", "B028", "E731"]
+[lint.per-file-ignores]
+"__init__.py" = ["F401", "E402"]

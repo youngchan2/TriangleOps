@@ -1,8 +1,8 @@
 import pytest
 import torch
+from conftest import TOL, ref_triangle_mul, requires_cuda, rnd
 
 import triangle_ops
-from conftest import rnd, ref_triangle_mul, TOL, requires_cuda
 
 
 def _weights(D, dtype, device):
@@ -33,8 +33,7 @@ def test_matches_fp32_reference(device, dtype, L, direction, masked):
         mask = torch.ones(1, L, L, dtype=torch.bool, device=device)
     w = _weights(D, dtype, device)
 
-    out = triangle_ops.triangle_multiplicative_update(
-        x, direction=direction, mask=mask, eps=1e-5, **w)
+    out = triangle_ops.triangle_multiplicative_update(x, direction=direction, mask=mask, eps=1e-5, **w)
     ref = ref_triangle_mul(x, mask, direction, 1e-5, **w)
     max_abs = (out.float() - ref).abs().max().item()
     assert max_abs < TOL[dtype], f"L={L} {direction} dtype={dtype} masked={masked} max_abs={max_abs:.3e}"
@@ -48,8 +47,15 @@ def test_precompute_forward_matches_oneshot(device):
     mask = torch.ones(1, L, L, dtype=torch.bool, device=device)
     w = _weights(D, dtype, device)
     pre = triangle_ops.triangle_mul.precompute(
-        w["norm_in_weight"], w["norm_in_bias"], w["p_in_weight"], w["g_in_weight"],
-        w["norm_out_weight"], w["norm_out_bias"], w["p_out_weight"], w["g_out_weight"])
+        w["norm_in_weight"],
+        w["norm_in_bias"],
+        w["p_in_weight"],
+        w["g_in_weight"],
+        w["norm_out_weight"],
+        w["norm_out_bias"],
+        w["p_out_weight"],
+        w["g_out_weight"],
+    )
     out_amortized = triangle_ops.triangle_mul.forward(x, pre, direction="outgoing", mask=mask)
     out_oneshot = triangle_ops.triangle_multiplicative_update(x, direction="outgoing", mask=mask, **w)
     assert torch.equal(out_amortized, out_oneshot)

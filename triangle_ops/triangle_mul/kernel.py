@@ -34,36 +34,57 @@ from .._common.dtype import tl_io_dtype
 
 @triton.autotune(
     configs=[
-        triton.Config({'BLOCK_M': 64,  'BLOCK_K': 32},  num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 64,  'BLOCK_K': 32},  num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_K': 32},  num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_K': 32},  num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_K': 64},  num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_K': 64},  num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 64,  'BLOCK_K': 64},  num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_M': 256, 'BLOCK_K': 32},  num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_M': 32,  'BLOCK_K': 64},  num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_K': 128}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_M": 64, "BLOCK_K": 32}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 64, "BLOCK_K": 32}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_M": 128, "BLOCK_K": 32}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 128, "BLOCK_K": 32}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_M": 128, "BLOCK_K": 64}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_M": 128, "BLOCK_K": 64}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 64, "BLOCK_K": 64}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_M": 256, "BLOCK_K": 32}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_M": 32, "BLOCK_K": 64}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 128, "BLOCK_K": 128}, num_warps=8, num_stages=2),
         # output phase (D_OUT=128) likes one-shot BLOCK_K=128
-        triton.Config({'BLOCK_M': 64,  'BLOCK_K': 128}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 128, 'BLOCK_K': 128}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 256, 'BLOCK_K': 128}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_M": 64, "BLOCK_K": 128}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 128, "BLOCK_K": 128}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 256, "BLOCK_K": 128}, num_warps=8, num_stages=2),
     ],
-    key=['M', 'D', 'D_OUT', 'TWO_INPUTS', 'X1_DMAJOR', 'TRANS', 'HAS_MASK'],
+    key=["M", "D", "D_OUT", "TWO_INPUTS", "X1_DMAJOR", "TRANS", "HAS_MASK"],
 )
 @triton.jit
 def fused_layer_norm_sigmoid_gated_transpose(
-    X1_ptr, X1_stride0, X1_stride1,       # value-branch input (stride0=token-m, stride1=feature-d)
-    X2_ptr, X2_stride0, X2_stride1,       # gate-branch input  (unused if not TWO_INPUTS)
-    Wp_ptr, Wp_stride0, Wp_stride1,       # (D_OUT, D) value proj (LN-folded)
-    Wg_ptr, Wg_stride0, Wg_stride1,       # (D_OUT, D) gate proj  (LN-folded)
-    sWp_ptr, sWg_ptr, BPc_ptr, BGc_ptr,
-    Mask_ptr, Mask_stride0,
-    Out_ptr, Out_stride0, Out_stride1,    # output strides: stride0=token-m, stride1=feature-k
-    M: tl.constexpr, D: tl.constexpr, D_OUT: tl.constexpr,
-    EPS: tl.constexpr, IO_DTYPE: tl.constexpr,
-    HAS_MASK: tl.constexpr, TWO_INPUTS: tl.constexpr, X1_DMAJOR: tl.constexpr, TRANS: tl.constexpr,
-    BLOCK_M: tl.constexpr, BLOCK_K: tl.constexpr,
+    X1_ptr,
+    X1_stride0,
+    X1_stride1,  # value-branch input (stride0=token-m, stride1=feature-d)
+    X2_ptr,
+    X2_stride0,
+    X2_stride1,  # gate-branch input  (unused if not TWO_INPUTS)
+    Wp_ptr,
+    Wp_stride0,
+    Wp_stride1,  # (D_OUT, D) value proj (LN-folded)
+    Wg_ptr,
+    Wg_stride0,
+    Wg_stride1,  # (D_OUT, D) gate proj  (LN-folded)
+    sWp_ptr,
+    sWg_ptr,
+    BPc_ptr,
+    BGc_ptr,
+    Mask_ptr,
+    Mask_stride0,
+    Out_ptr,
+    Out_stride0,
+    Out_stride1,  # output strides: stride0=token-m, stride1=feature-k
+    M: tl.constexpr,
+    D: tl.constexpr,
+    D_OUT: tl.constexpr,
+    EPS: tl.constexpr,
+    IO_DTYPE: tl.constexpr,
+    HAS_MASK: tl.constexpr,
+    TWO_INPUTS: tl.constexpr,
+    X1_DMAJOR: tl.constexpr,
+    TRANS: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_K: tl.constexpr,
 ):
     pid_m = tl.program_id(0)
     m_offs = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
@@ -72,13 +93,19 @@ def fused_layer_norm_sigmoid_gated_transpose(
     inv_D = 1.0 / D
 
     # ---- load X1 (value branch) as (BLOCK_M, D), coalesced for either layout ----
-    if X1_DMAJOR:                          # X1 is (D, M): load (D, BM) coalesced, then trans
-        X1t = tl.load(X1_ptr + d_offs[:, None] * X1_stride1 + m_offs[None, :] * X1_stride0,
-                      mask=m_mask[None, :], other=0.0)
+    if X1_DMAJOR:  # X1 is (D, M): load (D, BM) coalesced, then trans
+        X1t = tl.load(
+            X1_ptr + d_offs[:, None] * X1_stride1 + m_offs[None, :] * X1_stride0,
+            mask=m_mask[None, :],
+            other=0.0,
+        )
         X1 = tl.trans(X1t)
-    else:                                  # X1 is (M, D): load (BM, D) directly
-        X1 = tl.load(X1_ptr + m_offs[:, None] * X1_stride0 + d_offs[None, :] * X1_stride1,
-                     mask=m_mask[:, None], other=0.0)
+    else:  # X1 is (M, D): load (BM, D) directly
+        X1 = tl.load(
+            X1_ptr + m_offs[:, None] * X1_stride0 + d_offs[None, :] * X1_stride1,
+            mask=m_mask[:, None],
+            other=0.0,
+        )
 
     X1_fp32 = X1.to(tl.float32)
     mean1 = tl.sum(X1_fp32, axis=-1) * inv_D
@@ -87,8 +114,11 @@ def fused_layer_norm_sigmoid_gated_transpose(
 
     # ---- load X2 (gate branch) — reuse X1 if single-input ----
     if TWO_INPUTS:
-        X2 = tl.load(X2_ptr + m_offs[:, None] * X2_stride0 + d_offs[None, :] * X2_stride1,
-                     mask=m_mask[:, None], other=0.0)
+        X2 = tl.load(
+            X2_ptr + m_offs[:, None] * X2_stride0 + d_offs[None, :] * X2_stride1,
+            mask=m_mask[:, None],
+            other=0.0,
+        )
         X2_fp32 = X2.to(tl.float32)
         mean2 = tl.sum(X2_fp32, axis=-1) * inv_D
         diff2 = X2_fp32 - mean2[:, None]
@@ -110,74 +140,187 @@ def fused_layer_norm_sigmoid_gated_transpose(
         BPc = tl.load(BPc_ptr + k_offs)
         BGc = tl.load(BGc_ptr + k_offs)
 
-        P = tl.dot(X1, Wp)                 # value ← X1
-        G = tl.dot(X2, Wg)                 # gate  ← X2
+        P = tl.dot(X1, Wp)  # value ← X1
+        G = tl.dot(X2, Wg)  # gate  ← X2
         P = rstd1[:, None] * (P - mean1[:, None] * sWp[None, :]) + BPc[None, :]
         G = rstd2[:, None] * (G - mean2[:, None] * sWg[None, :]) + BGc[None, :]
         Out = tl.sigmoid(G) * P
         if HAS_MASK:
             Out = Out * m_val[:, None]
 
-        if TRANS:                          # write (D_OUT, M): Out[k, m], m contiguous
-            tl.store(Out_ptr + k_offs[:, None] * Out_stride1 + m_offs[None, :] * Out_stride0,
-                     tl.trans(Out).to(IO_DTYPE), mask=m_mask[None, :])
-        else:                              # write (M, D_OUT): Out[m, k]
-            tl.store(Out_ptr + m_offs[:, None] * Out_stride0 + k_offs[None, :] * Out_stride1,
-                     Out.to(IO_DTYPE), mask=m_mask[:, None])
+        if TRANS:  # write (D_OUT, M): Out[k, m], m contiguous
+            tl.store(
+                Out_ptr + k_offs[:, None] * Out_stride1 + m_offs[None, :] * Out_stride0,
+                tl.trans(Out).to(IO_DTYPE),
+                mask=m_mask[None, :],
+            )
+        else:  # write (M, D_OUT): Out[m, k]
+            tl.store(
+                Out_ptr + m_offs[:, None] * Out_stride0 + k_offs[None, :] * Out_stride1,
+                Out.to(IO_DTYPE),
+                mask=m_mask[:, None],
+            )
 
 
 # ---------------------------------------------------------------------------
 # Phase launch wrappers (signatures unchanged — module.py depends on them)
 # ---------------------------------------------------------------------------
-def _launch(X1, X1_s0, X1_s1, X2, X2_s0, X2_s1, Wp, Wg, sWp, sWg, BPc, BGc,
-            mask, out, out_s0, out_s1, M, D, D_OUT, eps,
-            *, two_inputs, x1_dmajor, trans):
+def _launch(
+    X1,
+    X1_s0,
+    X1_s1,
+    X2,
+    X2_s0,
+    X2_s1,
+    Wp,
+    Wg,
+    sWp,
+    sWg,
+    BPc,
+    BGc,
+    mask,
+    out,
+    out_s0,
+    out_s1,
+    M,
+    D,
+    D_OUT,
+    eps,
+    *,
+    two_inputs,
+    x1_dmajor,
+    trans,
+):
     if mask is not None:
         mask_ptr, mask_s0, has_mask = mask, mask.stride(0), True
     else:
         mask_ptr, mask_s0, has_mask = X1, 0, False
     if X2 is None:
         X2, X2_s0, X2_s1 = X1, X1_s0, X1_s1
-    grid = lambda meta: (triton.cdiv(M, meta['BLOCK_M']),)
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]),)
     fused_layer_norm_sigmoid_gated_transpose[grid](
-        X1, X1_s0, X1_s1, X2, X2_s0, X2_s1,
-        Wp, Wp.stride(0), Wp.stride(1), Wg, Wg.stride(0), Wg.stride(1),
-        sWp, sWg, BPc, BGc, mask_ptr, mask_s0,
-        out, out_s0, out_s1,
-        M=M, D=D, D_OUT=D_OUT, EPS=eps, IO_DTYPE=tl_io_dtype(X1.dtype),
-        HAS_MASK=has_mask, TWO_INPUTS=two_inputs, X1_DMAJOR=x1_dmajor, TRANS=trans,
+        X1,
+        X1_s0,
+        X1_s1,
+        X2,
+        X2_s0,
+        X2_s1,
+        Wp,
+        Wp.stride(0),
+        Wp.stride(1),
+        Wg,
+        Wg.stride(0),
+        Wg.stride(1),
+        sWp,
+        sWg,
+        BPc,
+        BGc,
+        mask_ptr,
+        mask_s0,
+        out,
+        out_s0,
+        out_s1,
+        M=M,
+        D=D,
+        D_OUT=D_OUT,
+        EPS=eps,
+        IO_DTYPE=tl_io_dtype(X1.dtype),
+        HAS_MASK=has_mask,
+        TWO_INPUTS=two_inputs,
+        X1_DMAJOR=x1_dmajor,
+        TRANS=trans,
     )
 
 
-def input_phase(x, mask, p_in_combined, g_in_combined,
-                sum_W_p_in, sum_W_g_in, B_p_in_const, B_g_in_const, eps):
+def input_phase(
+    x,
+    mask,
+    p_in_combined,
+    g_in_combined,
+    sum_W_p_in,
+    sum_W_g_in,
+    B_p_in_const,
+    B_g_in_const,
+    eps,
+):
     """Kernel A: LN_in + p_in·σ(g_in) + mask → ab in (2D, B, L, L) (D-major, TRANS)."""
     B, L, _, D = x.shape
     D_OUT = p_in_combined.shape[0]
     M = B * L * L
     x_flat = x.reshape(M, D)
-    out_t = torch.empty(D_OUT, M, device=x.device, dtype=x.dtype)        # (D_OUT, M)
+    out_t = torch.empty(D_OUT, M, device=x.device, dtype=x.dtype)  # (D_OUT, M)
     mask_flat = mask.reshape(M).to(torch.int8).contiguous() if mask is not None else None
     # X1=x (M,D): s0=token=D, s1=feature=1.  Out (D_OUT,M): s0=token=1, s1=feature=M.
-    _launch(x_flat, x_flat.stride(0), x_flat.stride(1), None, 0, 0,
-            p_in_combined, g_in_combined, sum_W_p_in, sum_W_g_in, B_p_in_const, B_g_in_const,
-            mask_flat, out_t, 1, M, M, D, D_OUT, eps,
-            two_inputs=False, x1_dmajor=False, trans=True)
+    _launch(
+        x_flat,
+        x_flat.stride(0),
+        x_flat.stride(1),
+        None,
+        0,
+        0,
+        p_in_combined,
+        g_in_combined,
+        sum_W_p_in,
+        sum_W_g_in,
+        B_p_in_const,
+        B_g_in_const,
+        mask_flat,
+        out_t,
+        1,
+        M,
+        M,
+        D,
+        D_OUT,
+        eps,
+        two_inputs=False,
+        x1_dmajor=False,
+        trans=True,
+    )
     return out_t.view(D_OUT, B, L, L)
 
 
-def output_phase(y_t, x, p_out_combined, g_out_combined,
-                 sum_W_p_out, sum_W_g_out, B_p_out_const, B_g_out_const, eps):
+def output_phase(
+    y_t,
+    x,
+    p_out_combined,
+    g_out_combined,
+    sum_W_p_out,
+    sum_W_g_out,
+    B_p_out_const,
+    B_g_out_const,
+    eps,
+):
     """Kernel C: σ(g_out(x)) ⊙ p_out(y) → (B, L, L, D).  X1=y (D-major), X2=x."""
     B, L, _, D = x.shape
     D_OUT = p_out_combined.shape[0]
     M = B * L * L
-    y_flat = y_t.reshape(D, M)                                           # (D, M)
+    y_flat = y_t.reshape(D, M)  # (D, M)
     x_flat = x.reshape(M, D)
-    out = torch.empty(M, D_OUT, device=x.device, dtype=x.dtype)          # (M, D_OUT)
+    out = torch.empty(M, D_OUT, device=x.device, dtype=x.dtype)  # (M, D_OUT)
     # X1=y (D,M): s0=token=1, s1=feature=M.  X2=x (M,D): s0=D, s1=1.  Out (M,D_OUT): s0=D_OUT, s1=1.
-    _launch(y_flat, 1, M, x_flat, x_flat.stride(0), x_flat.stride(1),
-            p_out_combined, g_out_combined, sum_W_p_out, sum_W_g_out, B_p_out_const, B_g_out_const,
-            None, out, out.stride(0), out.stride(1), M, D, D_OUT, eps,
-            two_inputs=True, x1_dmajor=True, trans=False)
+    _launch(
+        y_flat,
+        1,
+        M,
+        x_flat,
+        x_flat.stride(0),
+        x_flat.stride(1),
+        p_out_combined,
+        g_out_combined,
+        sum_W_p_out,
+        sum_W_g_out,
+        B_p_out_const,
+        B_g_out_const,
+        None,
+        out,
+        out.stride(0),
+        out.stride(1),
+        M,
+        D,
+        D_OUT,
+        eps,
+        two_inputs=True,
+        x1_dmajor=True,
+        trans=False,
+    )
     return out.view(B, L, L, D_OUT)

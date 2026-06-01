@@ -1,6 +1,5 @@
 """Shared test fixtures + pure-torch fp32 references (no cuequivariance dependency)."""
 
-import math
 import pytest
 import torch
 import torch.nn.functional as F
@@ -27,8 +26,25 @@ TOL = {torch.bfloat16: 5e-2, torch.float16: 1e-2}
 # --------------------------------------------------------------------------- #
 # fp32 references (ground truth)
 # --------------------------------------------------------------------------- #
-def ref_attn_pair_bias(X, WQ, WK, WV, Z, W_ln, B_ln, W_proj_z, B_proj_z,
-                       W_proj_g, B_proj_g, W_proj_o, B_proj_o, H, D, scale, eps):
+def ref_attn_pair_bias(
+    X,
+    WQ,
+    WK,
+    WV,
+    Z,
+    W_ln,
+    B_ln,
+    W_proj_z,
+    B_proj_z,
+    W_proj_g,
+    B_proj_g,
+    W_proj_o,
+    B_proj_o,
+    H,
+    D,
+    scale,
+    eps,
+):
     M, N = X.shape
     Cz = Z.shape[-1]
     Xf = X.float()
@@ -45,8 +61,25 @@ def ref_attn_pair_bias(X, WQ, WK, WV, Z, W_ln, B_ln, W_proj_z, B_proj_z,
     return F.linear(g * o, W_proj_o.float(), bo)
 
 
-def ref_triangle_attn(X, W_ln, B_ln, WQ, WK, WV, W_proj_z, B_proj_z,
-                      W_proj_g, B_proj_g, W_proj_o, B_proj_o, H, D, scale, eps, mask):
+def ref_triangle_attn(
+    X,
+    W_ln,
+    B_ln,
+    WQ,
+    WK,
+    WV,
+    W_proj_z,
+    B_proj_z,
+    W_proj_g,
+    B_proj_g,
+    W_proj_o,
+    B_proj_o,
+    H,
+    D,
+    scale,
+    eps,
+    mask,
+):
     N = X.shape[0]
     Cin = X.shape[-1]
     xln = F.layer_norm(X.float(), (Cin,), W_ln.float(), B_ln.float(), eps=eps)

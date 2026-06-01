@@ -17,7 +17,6 @@ Naming follows the triangle_mul kernel style: `_stride{0,1,2}` for strides,
 
 import triton
 import triton.language as tl
-import torch
 
 from .._common.dtype import tl_io_dtype
 
@@ -25,52 +24,65 @@ from .._common.dtype import tl_io_dtype
 @triton.autotune(
     configs=[
         # ---- Small BLOCK_M (8) — max parallelism, min reg ----
-        triton.Config({'BLOCK_M': 8,  'BLOCK_K': 16, 'N_BLOCK': 16}, num_warps=2, num_stages=2),
-        triton.Config({'BLOCK_M': 8,  'BLOCK_K': 16, 'N_BLOCK': 32}, num_warps=2, num_stages=2),
-        triton.Config({'BLOCK_M': 8,  'BLOCK_K': 16, 'N_BLOCK': 64}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 8,  'BLOCK_K': 32, 'N_BLOCK': 16}, num_warps=2, num_stages=2),
-        triton.Config({'BLOCK_M': 8,  'BLOCK_K': 32, 'N_BLOCK': 32}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 8,  'BLOCK_K': 64, 'N_BLOCK': 16}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 8,  'BLOCK_K': 64, 'N_BLOCK': 32}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 8,  'BLOCK_K': 128, 'N_BLOCK': 16}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 8, "BLOCK_K": 16, "N_BLOCK": 16}, num_warps=2, num_stages=2),
+        triton.Config({"BLOCK_M": 8, "BLOCK_K": 16, "N_BLOCK": 32}, num_warps=2, num_stages=2),
+        triton.Config({"BLOCK_M": 8, "BLOCK_K": 16, "N_BLOCK": 64}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 8, "BLOCK_K": 32, "N_BLOCK": 16}, num_warps=2, num_stages=2),
+        triton.Config({"BLOCK_M": 8, "BLOCK_K": 32, "N_BLOCK": 32}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 8, "BLOCK_K": 64, "N_BLOCK": 16}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 8, "BLOCK_K": 64, "N_BLOCK": 32}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 8, "BLOCK_K": 128, "N_BLOCK": 16}, num_warps=4, num_stages=2),
         # ---- Medium BLOCK_M (16) — matches H100 SM count at M=512 ----
-        triton.Config({'BLOCK_M': 16, 'BLOCK_K': 16, 'N_BLOCK': 16}, num_warps=2, num_stages=2),
-        triton.Config({'BLOCK_M': 16, 'BLOCK_K': 16, 'N_BLOCK': 32}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 16, 'BLOCK_K': 16, 'N_BLOCK': 32}, num_warps=4, num_stages=3),
-        triton.Config({'BLOCK_M': 16, 'BLOCK_K': 16, 'N_BLOCK': 64}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 16, 'BLOCK_K': 32, 'N_BLOCK': 16}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 16, 'BLOCK_K': 32, 'N_BLOCK': 32}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 16, 'BLOCK_K': 32, 'N_BLOCK': 32}, num_warps=4, num_stages=3),
-        triton.Config({'BLOCK_M': 16, 'BLOCK_K': 32, 'N_BLOCK': 64}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 16, 'BLOCK_K': 64, 'N_BLOCK': 16}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 16, 'BLOCK_K': 64, 'N_BLOCK': 16}, num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_M': 16, 'BLOCK_K': 64, 'N_BLOCK': 32}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 16, 'BLOCK_K': 128, 'N_BLOCK': 16}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_M": 16, "BLOCK_K": 16, "N_BLOCK": 16}, num_warps=2, num_stages=2),
+        triton.Config({"BLOCK_M": 16, "BLOCK_K": 16, "N_BLOCK": 32}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 16, "BLOCK_K": 16, "N_BLOCK": 32}, num_warps=4, num_stages=3),
+        triton.Config({"BLOCK_M": 16, "BLOCK_K": 16, "N_BLOCK": 64}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 16, "BLOCK_K": 32, "N_BLOCK": 16}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 16, "BLOCK_K": 32, "N_BLOCK": 32}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 16, "BLOCK_K": 32, "N_BLOCK": 32}, num_warps=4, num_stages=3),
+        triton.Config({"BLOCK_M": 16, "BLOCK_K": 32, "N_BLOCK": 64}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 16, "BLOCK_K": 64, "N_BLOCK": 16}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 16, "BLOCK_K": 64, "N_BLOCK": 16}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_M": 16, "BLOCK_K": 64, "N_BLOCK": 32}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 16, "BLOCK_K": 128, "N_BLOCK": 16}, num_warps=8, num_stages=2),
         # ---- Larger BLOCK_M (32) — more compute per program ----
-        triton.Config({'BLOCK_M': 32, 'BLOCK_K': 16, 'N_BLOCK': 16}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 32, 'BLOCK_K': 16, 'N_BLOCK': 32}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 32, 'BLOCK_K': 32, 'N_BLOCK': 16}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 32, 'BLOCK_K': 32, 'N_BLOCK': 16}, num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_M': 32, 'BLOCK_K': 32, 'N_BLOCK': 32}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 32, 'BLOCK_K': 32, 'N_BLOCK': 32}, num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_M': 32, 'BLOCK_K': 64, 'N_BLOCK': 16}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 32, 'BLOCK_K': 64, 'N_BLOCK': 16}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_M": 32, "BLOCK_K": 16, "N_BLOCK": 16}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 32, "BLOCK_K": 16, "N_BLOCK": 32}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 32, "BLOCK_K": 32, "N_BLOCK": 16}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 32, "BLOCK_K": 32, "N_BLOCK": 16}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_M": 32, "BLOCK_K": 32, "N_BLOCK": 32}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 32, "BLOCK_K": 32, "N_BLOCK": 32}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_M": 32, "BLOCK_K": 64, "N_BLOCK": 16}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 32, "BLOCK_K": 64, "N_BLOCK": 16}, num_warps=8, num_stages=2),
         # ---- Large BLOCK_M (64) ----
-        triton.Config({'BLOCK_M': 64, 'BLOCK_K': 16, 'N_BLOCK': 16}, num_warps=4, num_stages=2),
-        triton.Config({'BLOCK_M': 64, 'BLOCK_K': 32, 'N_BLOCK': 16}, num_warps=8, num_stages=2),
-        triton.Config({'BLOCK_M': 64, 'BLOCK_K': 32, 'N_BLOCK': 32}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_M": 64, "BLOCK_K": 16, "N_BLOCK": 16}, num_warps=4, num_stages=2),
+        triton.Config({"BLOCK_M": 64, "BLOCK_K": 32, "N_BLOCK": 16}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_M": 64, "BLOCK_K": 32, "N_BLOCK": 32}, num_warps=8, num_stages=2),
     ],
-    key=['M', 'N', 'H', 'D'],
+    key=["M", "N", "H", "D"],
 )
 @triton.jit
 def _apb_kernel(
-    X_ptr, X_stride0, X_stride1,
-    Wqkv_ptr, Wqkv_stride0, Wqkv_stride1,    # (N, 3*H*D) concat: per-head [Q | K | V]
-    Z_ptr, Z_stride0, Z_stride1, Z_stride2,
-    Wc_ptr, Wc_stride0, Wc_stride1,          # w_combined (H, N)
-    SWc_ptr, SWc_stride0,                    # sum_w_combined (H,)
-    Bc_ptr, Bc_stride0,                      # b_const (H,)
-    Og_ptr, Og_stride0, Og_stride1,          # (M, H*D) attention output (pre-gate, pre-Wo)
+    X_ptr,
+    X_stride0,
+    X_stride1,
+    Wqkv_ptr,
+    Wqkv_stride0,
+    Wqkv_stride1,  # (N, 3*H*D) concat: per-head [Q | K | V]
+    Z_ptr,
+    Z_stride0,
+    Z_stride1,
+    Z_stride2,
+    Wc_ptr,
+    Wc_stride0,
+    Wc_stride1,  # w_combined (H, N)
+    SWc_ptr,
+    SWc_stride0,  # sum_w_combined (H,)
+    Bc_ptr,
+    Bc_stride0,  # b_const (H,)
+    Og_ptr,
+    Og_stride0,
+    Og_stride1,  # (M, H*D) attention output (pre-gate, pre-Wo)
     M: tl.constexpr,
     N: tl.constexpr,
     H: tl.constexpr,
@@ -99,15 +111,9 @@ def _apb_kernel(
         other=0.0,
     )
 
-    WQ_h = tl.load(
-        Wqkv_ptr + c_offs[:, None] * Wqkv_stride0 + (qkv_base + d_offs)[None, :] * Wqkv_stride1
-    )
-    WK_h = tl.load(
-        Wqkv_ptr + c_offs[:, None] * Wqkv_stride0 + (qkv_base + D + d_offs)[None, :] * Wqkv_stride1
-    )
-    WV_h = tl.load(
-        Wqkv_ptr + c_offs[:, None] * Wqkv_stride0 + (qkv_base + 2 * D + d_offs)[None, :] * Wqkv_stride1
-    )
+    WQ_h = tl.load(Wqkv_ptr + c_offs[:, None] * Wqkv_stride0 + (qkv_base + d_offs)[None, :] * Wqkv_stride1)
+    WK_h = tl.load(Wqkv_ptr + c_offs[:, None] * Wqkv_stride0 + (qkv_base + D + d_offs)[None, :] * Wqkv_stride1)
+    WV_h = tl.load(Wqkv_ptr + c_offs[:, None] * Wqkv_stride0 + (qkv_base + 2 * D + d_offs)[None, :] * Wqkv_stride1)
 
     Q_block = tl.dot(X_q, WQ_h)
     Q_fp16 = Q_block.to(IO_DTYPE)
@@ -117,7 +123,7 @@ def _apb_kernel(
 
     inv_N = 1.0 / N
 
-    m_i = tl.full((BLOCK_M,), -float('inf'), dtype=tl.float32)
+    m_i = tl.full((BLOCK_M,), -float("inf"), dtype=tl.float32)
     l_i = tl.zeros((BLOCK_M,), dtype=tl.float32)
     O_acc = tl.zeros((BLOCK_M, D), dtype=tl.float32)
 
@@ -155,7 +161,8 @@ def _apb_kernel(
 
             w_c_chunk = tl.load(
                 Wc_ptr + pid_h * Wc_stride0 + nb_offs * Wc_stride1,
-                mask=nb_mask, other=0.0,
+                mask=nb_mask,
+                other=0.0,
             )
 
             chunk_size = N_BLOCK + 0.0
@@ -178,7 +185,7 @@ def _apb_kernel(
         bias_tile = rstd * (bias_partial - mean * sum_w_combined_h) + b_const_h
 
         S = S + bias_tile
-        S = tl.where(k_mask[None, :], S, -float('inf'))
+        S = tl.where(k_mask[None, :], S, -float("inf"))
 
         m_new = tl.maximum(m_i, tl.max(S, axis=1))
         alpha = tl.exp(m_i - m_new)
@@ -217,16 +224,34 @@ def apb_forward(X, W_QKV, Z, W_combined, sum_W_combined, B_const, Og, scale=1.0,
     assert B_const.shape == (H,)
     assert Og.shape == (M, H * D)
 
-    grid = lambda meta: (triton.cdiv(M, meta['BLOCK_M']), H)
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]), H)
     _apb_kernel[grid](
-        X, X.stride(0), X.stride(1),
-        W_QKV, W_QKV.stride(0), W_QKV.stride(1),
-        Z, Z.stride(0), Z.stride(1), Z.stride(2),
-        W_combined, W_combined.stride(0), W_combined.stride(1),
-        sum_W_combined, sum_W_combined.stride(0),
-        B_const, B_const.stride(0),
-        Og, Og.stride(0), Og.stride(1),
-        M=M, N=N, H=H, D=D, SCALE=scale, EPS=eps,
+        X,
+        X.stride(0),
+        X.stride(1),
+        W_QKV,
+        W_QKV.stride(0),
+        W_QKV.stride(1),
+        Z,
+        Z.stride(0),
+        Z.stride(1),
+        Z.stride(2),
+        W_combined,
+        W_combined.stride(0),
+        W_combined.stride(1),
+        sum_W_combined,
+        sum_W_combined.stride(0),
+        B_const,
+        B_const.stride(0),
+        Og,
+        Og.stride(0),
+        Og.stride(1),
+        M=M,
+        N=N,
+        H=H,
+        D=D,
+        SCALE=scale,
+        EPS=eps,
         IO_DTYPE=tl_io_dtype(X.dtype),
     )
     return Og
