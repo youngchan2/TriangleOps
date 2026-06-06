@@ -25,10 +25,66 @@ ROOT = os.path.dirname(HERE)
 _DEFAULT_SIZES = [128, 192, 256, 384, 512, 768, 1024, 1536, 2048]
 _SERIES = [
     ("triangle_ops", "TriangleOps (excl pc)", "#1f77b4", "-", "o"),
-    ("triangle_ops_incl", "TriangleOps (incl pc)", "#1f77b4", "--", "o"),
+    ("triangle_ops_incl", "TriangleOps (incl pc)", "#1f77b4", "--", "^"),
     ("cueq", "cuequivariance", "#d62728", "-", "s"),
     ("torch", "torch (bf16)", "#ff7f0e", ":", "x"),
 ]
+
+# parity (break-even vs cuequiv) on the speedup plot: a SOLID line plus a shaded
+# "cuequiv is faster" band (speedup < 1) — so it can't be confused with the
+# dashed incl-pc data series.
+_PARITY = dict(color="#333333", linewidth=1.6, linestyle="-", zorder=1.5)
+_LOSS_SHADE = dict(color="#d62728", alpha=0.07, zorder=0)
+
+
+def make_plot(rows, op, dtype, out_dir):
+    """Draw latency (left) + speedup-vs-cuequiv (right) → out_dir/{op}.png.
+    Reused by the live sweep and by offline re-plotting from a saved CSV."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    sizes = [r["size"] for r in rows]
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
+
+    # left: latency
+    for k, lbl, c, ls, mk in _SERIES:
+        ax1.plot(sizes, [r[k] for r in rows], label=lbl, color=c, linestyle=ls, marker=mk)
+    ax1.set_xscale("log", base=2)
+    ax1.set_yscale("log")
+    ax1.set_xlabel("seq length")
+    ax1.set_ylabel("latency [ms]")
+    ax1.set_title(f"{op} latency ({dtype})")
+    ax1.grid(True, which="both", alpha=0.3)
+    ax1.legend(fontsize=9)
+
+    # right: speedup vs cuequiv — shaded loss band + solid parity line
+    ax2.axhspan(0.0, 1.0, **_LOSS_SHADE)
+    for k, lbl, c, ls, mk in _SERIES:
+        if not k.startswith("triangle_ops"):
+            continue
+        ax2.plot(
+            sizes,
+            [r["cueq"] / r[k] for r in rows],
+            label=f"{lbl} / cueq",
+            color=c,
+            linestyle=ls,
+            marker=mk,
+        )
+    ax2.axhline(1.0, label="parity (= cuequiv)", **_PARITY)
+    ax2.set_xscale("log", base=2)
+    ax2.set_xlabel("seq length")
+    ax2.set_ylabel("speedup vs cueq (>1 = faster)")
+    ax2.set_title(f"{op} speedup vs cuequivariance")
+    ax2.grid(True, alpha=0.3)
+    ax2.legend(fontsize=9)
+
+    fig.tight_layout()
+    png_path = os.path.join(out_dir, f"{op}.png")
+    fig.savefig(png_path, dpi=130)
+    plt.close(fig)
+    print(f"Wrote {png_path}")
 
 
 def main():
@@ -95,44 +151,7 @@ def main():
     print(f"Wrote {csv_path}")
 
     try:
-        import matplotlib
-
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-
-        sizes = [r["size"] for r in rows]
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 5))
-        for k, lbl, c, ls, mk in _SERIES:
-            ax1.plot(sizes, [r[k] for r in rows], label=lbl, color=c, linestyle=ls, marker=mk)
-        ax1.set_xscale("log", base=2)
-        ax1.set_yscale("log")
-        ax1.set_xlabel("seq length")
-        ax1.set_ylabel("latency [ms]")
-        ax1.set_title(f"{args.op} latency ({args.dtype})")
-        ax1.grid(True, which="both", alpha=0.3)
-        ax1.legend(fontsize=9)
-        for k, lbl, c, ls, mk in _SERIES:
-            if not k.startswith("triangle_ops"):
-                continue
-            ax2.plot(
-                sizes,
-                [r["cueq"] / r[k] for r in rows],
-                label=f"{lbl} / cueq",
-                color=c,
-                linestyle=ls,
-                marker=mk,
-            )
-        ax2.axhline(1.0, color="gray", linewidth=0.8)
-        ax2.set_xscale("log", base=2)
-        ax2.set_xlabel("seq length")
-        ax2.set_ylabel("speedup vs cueq (>1 = faster)")
-        ax2.set_title(f"{args.op} speedup vs cuequivariance")
-        ax2.grid(True, alpha=0.3)
-        ax2.legend(fontsize=9)
-        fig.tight_layout()
-        png_path = os.path.join(out_dir, f"{args.op}.png")
-        fig.savefig(png_path, dpi=130)
-        print(f"Wrote {png_path}")
+        make_plot(rows, args.op, args.dtype, out_dir)
     except ImportError:
         print("(matplotlib unavailable — skipping plot)")
 
