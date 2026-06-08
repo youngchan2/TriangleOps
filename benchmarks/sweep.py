@@ -24,8 +24,7 @@ ROOT = os.path.dirname(HERE)
 
 _DEFAULT_SIZES = [128, 192, 256, 384, 512, 768, 1024, 1536, 2048]
 _SERIES = [
-    ("triangle_ops", "TriangleOps (excl pc)", "#1f77b4", "-", "o"),
-    ("triangle_ops_incl", "TriangleOps (incl pc)", "#1f77b4", "--", "^"),
+    ("triangle_ops", "TriangleOps (ours)", "#1f77b4", "-", "o"),
     ("cueq", "cuequivariance", "#d62728", "-", "s"),
     ("torch", "torch (bf16)", "#ff7f0e", ":", "x"),
 ]

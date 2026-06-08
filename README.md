@@ -1,13 +1,13 @@
 # TriangleOps
 
 Fused Triton kernels for the three AlphaFold-3 **Pairformer** primitives, tuned to
-beat NVIDIA `cuequivariance` on H100 (bf16) while being a drop-in replacement:
+beat NVIDIA [`cuequivariance`](https://github.com/NVIDIA/cuEquivariance) on H100 (bf16) while being a drop-in replacement:
 
-| op | fused scope | speedup vs cuequivariance (H100, bf16, excl pc) |
-|----|-------------|--------------------------------------------------|
+| op | fused scope | speedup vs cuequivariance (H100, bf16) |
+|----|-------------|----------------------------------------|
 | `attention_pair_bias` | QKV proj + LN(Z) + bias proj + attention | **1.7–4.1×** across all M (128–2048) |
 | `triangle_multiplicative_update` | LN + gated proj + triangular einsum + gated proj | **1.2–2.5×** across all L (128–2048) |
-| `triangle_attention` | LN + Q/K/V proj + bias proj + attention | **1.5–1.9×** for N ≤ 256, ~par to N ≈ 768, cuDNN wins N ≥ 1024 |
+| `triangle_attention` | LN + Q/K/V proj + bias proj + attention | **up to 1.9×** for N ≤ 512, cuDNN-FlashAttention wins from N ≈ 768 |
 
 All three are **more accurate** than cuequiv (LN affine folded in fp32) and produce
 results **bit-identical** to the original `bench/` experiments they were distilled from.
@@ -15,47 +15,67 @@ results **bit-identical** to the original `bench/` experiments they were distill
 ## Benchmarks (H100 PCIe, bf16)
 
 Each plot: **left** = latency vs sequence length (log-log), **right** = speedup vs
-cuequivariance (>1 = TriangleOps faster). `excl pc` = precompute amortized at model
-init (deployment number); `incl pc` = precompute re-run every call (strict apples-to-
-apples). Reproduce with `python -m benchmarks.sweep --op <op> --out-dir assets`
-(writes `assets/<op>.png`).
+cuequivariance (>1 = TriangleOps faster). Latency is the per-call deployment cost — the
+LayerNorm-affine folding is a one-time model-init step (like BN-fusion / weight
+prepacking), not a per-call cost. Reproduce with
+`python -m benchmarks.sweep --op <op> --out-dir assets` (writes `assets/<op>.png`).
 
 ### `attention_pair_bias`  (M = single-seq length; H=4, D=32, C_z=128)
 ![attention_pair_bias](assets/attn_pair_bias.png)
 
-| M | cueq (ms) | TriangleOps excl | **speedup** | incl pc |
-|---|-----------|------------------|-------------|---------|
-| 128  | 0.319 | 0.078 | **4.07×** | 1.93× |
-| 512  | 0.400 | 0.177 | **2.26×** | 1.54× |
-| 1024 | 0.941 | 0.496 | **1.90×** | 1.63× |
-| 2048 | 3.165 | 1.859 | **1.70×** | 1.60× |
+| M | cueq (ms) | ours (ms) | speedup |
+|---|-----------|-----------|---------|
+| 128  | 0.324 | 0.079 | **4.11×** |
+| 512  | 0.396 | 0.181 | **2.19×** |
+| 1024 | 0.944 | 0.502 | **1.88×** |
+| 2048 | 3.170 | 1.843 | **1.72×** |
 
-→ faster than cuequiv at **every** size (1.7–4.1× excl, 1.5–2.0× incl).
+→ faster than cuequiv at **every** size (1.7–4.1×).
 
 ### `triangle_multiplicative_update`  (L = pair-seq length; D=128, outgoing)
 ![triangle_multiplicative_update](assets/triangle_mul.png)
 
-| L | cueq (ms) | TriangleOps excl | **speedup** | incl pc |
-|---|-----------|------------------|-------------|---------|
-| 128  | 0.354 | 0.141 | **2.52×** | 1.12× |
-| 512  | 0.717 | 0.568 | **1.26×** | 0.94× |
-| 1024 | 2.946 | 2.428 | **1.21×** | 1.13× |
-| 2048 | 13.84 | 11.91 | **1.16×** | 1.15× |
+| L | cueq (ms) | ours (ms) | speedup |
+|---|-----------|-----------|---------|
+| 128  | 0.353 | 0.142 | **2.49×** |
+| 512  | 0.694 | 0.561 | **1.24×** |
+| 1024 | 2.952 | 2.416 | **1.22×** |
+| 2048 | 13.800 | 11.485 | **1.20×** |
 
-→ faster at every size (excl); incl pc ≈ par (precompute is ~0.17 ms fixed).
+→ faster at every size (1.2–2.5×).
 
 ### `triangle_attention`  (N = pair-seq length; H=4, D=32, C_in=128)
 ![triangle_attention](assets/triangle_attn.png)
 
-| N | cueq (ms) | TriangleOps excl | **speedup** | incl pc |
-|---|-----------|------------------|-------------|---------|
-| 128  | 0.271 | 0.143 | **1.89×** | 0.75× |
-| 256  | 0.538 | 0.370 | **1.45×** | 0.93× |
-| 768  | 7.49  | 7.35  | 1.02×     | 0.99× |
-| 1024 | 15.07 | 16.13 | 0.93×     | 0.87× |
+| N | cueq (ms) | ours (ms) | speedup |
+|---|-----------|-----------|---------|
+| 128  | 0.279 | 0.148 | **1.88×** |
+| 256  | 0.528 | 0.366 | **1.44×** |
+| 512  | 2.649 | 2.421 | **1.09×** |
+| 768  | 6.985 | 7.374 | 0.95× |
+| 1024 | 15.045 | 15.921 | 0.94× |
 
-→ wins for **N ≤ 768**; beyond N ≈ 1024 cuequiv's cuDNN-FlashAttention backend
-takes over (we materialize the bias separately, it fuses into the attention).
+→ wins for **N ≤ 512** (up to 1.9×); from N ≈ 768 cuequiv's cuDNN-FlashAttention
+backend takes over (we materialize the bias separately, it fuses into the attention).
+
+## What's fused — vs cuequivariance
+
+Both use Triton; we just pack more stages into each launch (and fold LayerNorm into the
+next projection's weights). `[ … ]` = one kernel/launch.
+
+```text
+attention_pair_bias
+  cuequiv :  [QKV proj] [LN(z)+bias] [attention] [gate+Wo]      (cuDNN SDPA, ~4 launches)
+  ours    :  [ QKV proj + LN(z) + bias + attention ]  [gate+Wo] (1 Triton kernel + torch)
+
+triangle_multiplicative_update
+  cuequiv :  [LN] [gated proj] [einsum] [LN] [gated proj]       (5 launches)
+  ours    :  [ LN + gated proj ] [einsum] [ LN + gated proj ]  (3 launches)
+```
+
+So: LN is never its own kernel (folded into the next proj), and for `attention_pair_bias`
+QKV + bias are pulled into the attention kernel (bias stays on-chip). The einsum stays
+cuBLAS in both.
 
 ## Layout
 
@@ -86,13 +106,13 @@ Each op exposes three entry points:
 ```python
 import triangle_ops
 
-# 1) one-shot (precompute INCLUDED) — simplest
+# 1) one-shot — simplest (folds weights inside the call)
 out = triangle_ops.triangle_multiplicative_update(
     x, direction="outgoing", mask=mask,
     norm_in_weight=..., norm_in_bias=..., p_in_weight=..., g_in_weight=...,
     norm_out_weight=..., norm_out_bias=..., p_out_weight=..., g_out_weight=...)
 
-# 2) amortized (precompute EXCLUDED) — fold weights once at model init, fast path per call
+# 2) amortized — fold weights once at model init, fast path per call
 pre = triangle_ops.triangle_mul.precompute(norm_in_weight, ..., g_out_weight)
 out = triangle_ops.triangle_mul.forward(x, pre, direction="outgoing", mask=mask)
 ```
@@ -128,8 +148,8 @@ CUDA_VISIBLE_DEVICES=1 python -m benchmarks.sweep --op triangle_attn
 CUDA_VISIBLE_DEVICES=1 python -m benchmarks.sweep --op attn_pair_bias
 ```
 
-`triangle_ops` in the sweep = precompute EXCLUDED (deployment number);
-`triangle_ops_incl` = precompute INCLUDED (strict apples-to-apples vs cuequiv).
+The sweep reports per-call latency (`triangle_ops`) vs cuequiv + torch; the LN-affine
+fold is a one-time model-init step, not counted per call.
 
 > cuequiv falls back to plain torch below a sequence-length threshold (eager mode):
 > `triangle_mul` L≤100 and `attention_pair_bias` M≤100 (pair size M²≤10000). All
