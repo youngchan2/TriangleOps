@@ -65,16 +65,22 @@ next projection's weights). `[ … ]` = one kernel/launch.
 
 ```text
 attention_pair_bias
-  cuequiv :  [QKV proj] [LN(z)+bias] [attention] [gate+Wo]      (cuDNN SDPA, ~4 launches)
-  ours    :  [ QKV proj + LN(z) + bias + attention ]  [gate+Wo] (1 Triton kernel + torch)
+  cuequiv :  [QKV proj] [LN(z)+bias] [attention] [gate+Wo]          (cuDNN SDPA, ~4 launches)
+  ours    :  [ QKV proj + LN(z) + bias + attention ]  [gate+Wo]     (1 Triton kernel + torch)
 
 triangle_multiplicative_update
-  cuequiv :  [LN] [gated proj] [einsum] [LN] [gated proj]       (5 launches)
-  ours    :  [ LN + gated proj ] [einsum] [ LN + gated proj ]  (3 launches)
+  cuequiv :  [LN] [gated proj] [einsum] [LN] [gated proj]           (5 launches)
+  ours    :  [ LN + gated proj ] [einsum] [ LN + gated proj ]       (3 launches)
+
+triangle_attention
+  cuequiv :  [LN] [Q/K/V proj] [bias proj] [attention] [gate+Wo]    (cuDNN attn; rest eager)
+  ours    :  [ LN+bias ] [ LN + Q/K/V + attention ]  [gate+Wo]      (2 Triton kernels + torch)
 ```
 
-So: LN is never its own kernel (folded into the next proj), and for `attention_pair_bias`
-QKV + bias are pulled into the attention kernel (bias stays on-chip). The einsum stays
+So: LN never gets its own kernel (folded into the next proj). `attention_pair_bias` inlines
+QKV + bias into the attention kernel (bias on-chip, 1 launch); `triangle_attention`
+materializes the row-shared bias once then fuses LN+Q/K/V+attention (2 launches — at large
+N cuequiv's bias-fused cuDNN attention pulls ahead); the einsum (`triangle_mul`) stays
 cuBLAS in both.
 
 ## Layout
