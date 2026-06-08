@@ -7,10 +7,11 @@ beat NVIDIA [`cuequivariance`](https://github.com/NVIDIA/cuEquivariance) on H100
 |----|-------------|----------------------------------------|
 | `attention_pair_bias` | QKV proj + LN(Z) + bias proj + attention | **1.7–4.1×** across all M (128–2048) |
 | `triangle_multiplicative_update` | LN + gated proj + triangular einsum + gated proj | **1.2–2.5×** across all L (128–2048) |
-| `triangle_attention` | LN + Q/K/V proj + bias proj + attention | **up to 1.9×** for N ≤ 512, cuDNN-FlashAttention wins from N ≈ 768 |
+| `triangle_attention` | LN + Q/K/V proj + bias proj + attention | **up to 1.7×** for N ≤ 384, cuequiv's compiled attention kernel wins from N ≈ 768 |
 
-All three are **more accurate** than cuequiv (LN affine folded in fp32) and produce
-results **bit-identical** to the original `bench/` experiments they were distilled from.
+All three fold the LayerNorm affine in fp32, and their outputs **match cuequiv's own
+kernels** within bf16/fp16 rounding (bf16 max|Δ| ≈ 2e-2, cos > 0.99998) — correctness is
+tested against cuequiv as the ground truth, not a hand-written reference.
 
 ## Benchmarks (H100 PCIe, bf16)
 
@@ -49,14 +50,17 @@ prepacking), not a per-call cost. Reproduce with
 
 | N | cueq (ms) | ours (ms) | speedup |
 |---|-----------|-----------|---------|
-| 128  | 0.279 | 0.148 | **1.88×** |
-| 256  | 0.528 | 0.366 | **1.44×** |
-| 512  | 2.649 | 2.421 | **1.09×** |
-| 768  | 6.985 | 7.374 | 0.95× |
-| 1024 | 15.045 | 15.921 | 0.94× |
+| 128  | 0.314 | 0.179 | **1.75×** |
+| 256  | 0.542 | 0.464 | **1.17×** |
+| 512  | 2.625 | 2.755 | 0.95× |
+| 768  | 6.998 | 8.204 | 0.85× |
+| 1024 | 14.672 | 17.957 | 0.82× |
 
-→ wins for **N ≤ 512** (up to 1.9×); from N ≈ 768 cuequiv's cuDNN-FlashAttention
-backend takes over (we materialize the bias separately, it fuses into the attention).
+→ wins for **N ≤ 384** (up to 1.7×), ≈parity at 512; from N ≈ 768 cuequiv's own compiled
+cuda attention kernel takes over (we materialize the bias separately, it fuses the bias
+inside the kernel). The gate now runs on `LN(x)` (matching K-Fold) via an extra torch
+LayerNorm pass — folding it into the attention kernel (which already LN's x) would recover
+the lost margin; see note below.
 
 ## What's fused — vs cuequivariance
 
@@ -73,15 +77,14 @@ triangle_multiplicative_update
   ours    :  [ LN + gated proj ] [einsum] [ LN + gated proj ]       (3 launches)
 
 triangle_attention
-  cuequiv :  [LN] [Q/K/V proj] [bias proj] [attention] [gate+Wo]    (cuDNN attn; rest eager)
+  cuequiv :  [LN] [Q/K/V proj] [bias proj] [attention] [gate+Wo]    (cuda binary; rest eager)
   ours    :  [ LN+bias ] [ LN + Q/K/V + attention ]  [gate+Wo]      (2 Triton kernels + torch)
 ```
 
 So: LN never gets its own kernel (folded into the next proj). `attention_pair_bias` inlines
 QKV + bias into the attention kernel (bias on-chip, 1 launch); `triangle_attention`
-materializes the row-shared bias once then fuses LN+Q/K/V+attention (2 launches — at large
-N cuequiv's bias-fused cuDNN attention pulls ahead); the einsum (`triangle_mul`) stays
-cuBLAS in both.
+materializes the row-shared bias once then fuses LN+Q/K/V+attention (2 launches — at large N cuequiv's own bias-fused attention kernel pulls ahead); the einsum
+(`triangle_mul`) stays cuBLAS in both.
 
 ## Layout
 
@@ -145,7 +148,8 @@ internal-k-loop (triangle_mul Kernel A).
 ## Tests & benchmarks
 
 ```bash
-# correctness (no cuequiv needed) — 44 cases across dtype × size × direction × mask
+# correctness — 60 cases (dtype × size × direction × mask) vs the cuequiv kernel
+# as ground truth (needs the `bench` extra: cuequivariance)
 CUDA_VISIBLE_DEVICES=1 python -m pytest tests/ -q
 
 # latency sweep vs cuequiv + torch  (needs the `bench` extra: cuequivariance, matplotlib)
