@@ -1,6 +1,6 @@
 import pytest
 import torch
-from conftest import TOL, ref_triangle_mul, requires_cuda, rnd
+from conftest import TOL, ref_triangle_mul, requires_cuda, requires_cueq, rnd
 
 import triangle_ops
 
@@ -18,12 +18,12 @@ def _weights(D, dtype, device):
     }
 
 
-@requires_cuda
+@requires_cueq
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("L", [64, 130, 256])
 @pytest.mark.parametrize("direction", ["outgoing", "incoming"])
 @pytest.mark.parametrize("masked", [False, True])
-def test_matches_fp32_reference(device, dtype, L, direction, masked):
+def test_matches_cuequiv(device, dtype, L, direction, masked):
     D = 128
     x = rnd(1, L, L, D, dtype=dtype, device=device, seed=1)
     if masked:
@@ -61,7 +61,7 @@ def test_precompute_forward_matches_oneshot(device):
     assert torch.equal(out_amortized, out_oneshot)
 
 
-@requires_cuda
+@requires_cueq
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("L", [128, 256])
 @pytest.mark.parametrize("direction", ["outgoing", "incoming"])

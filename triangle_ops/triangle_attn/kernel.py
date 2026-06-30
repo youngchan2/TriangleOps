@@ -1,17 +1,21 @@
 """Fused triangle-attention Triton kernels (low-level) — two-launch "v3" winner.
 
-Triangle attention's bias Bp[h,q,k] = LN(x[q,k,:]) @ W_proj_z[:,h] is SHARED
-across all N rows i.  A single fused launch would recompute it per row
+LN is computed ONCE outside the kernels as x̃ = LN(x) (see module.py) and the
+kernels read that pre-normalized x̃ directly — there is no LN-absorption and no
+per-token Welford inside the kernels.
+
+Triangle attention's bias Bp[h,q,k] = x̃[q,k,:] @ W_proj_z[:,h] + B_proj_z[h] is
+SHARED across all N rows i.  A single fused launch would recompute it per row
 (O(N³·H·C_in)); instead we split:
 
   bias_proj_kernel     — materialize Bp (H, N, N) ONCE  (O(N²·H·C_in))
-  triangle_attn_kernel — per (i, h, q_block): LN + Q/K/V proj + FA-v2 with Bp
+  triangle_attn_kernel — per (i, h, q_block): Q/K/V proj + FA-v2 with Bp
                          as input.  K/V are produced by a SINGLE matmul through
                          a feature-interleaved W_KV + tl.split, and BLOCK_M is
                          allowed up to 128 to amortize K/V loads across queries.
 
-LN affine is pre-folded into Q/K/V and bias-proj weights (see module.py).
-gate + Wo stay in PyTorch.  Fusion scope: LN + Q/K/V proj + bias proj + attention.
+gate + Wo stay in PyTorch.  Fusion scope: Q/K/V proj + bias proj + attention
+(reading the shared x̃).
 
 Naming follows the triangle_mul kernel style: `_stride{0,1,2}` for strides,
 `_offs` for index ranges, `_fp32` for float casts, `_mask` for masks, `Out` tile.
@@ -48,10 +52,8 @@ def bias_proj_kernel(
     WZ_ptr,
     WZ_stride0,
     WZ_stride1,
-    sWZ_ptr,
-    sWZ_stride0,
-    BZc_ptr,
-    BZc_stride0,
+    BZ_ptr,
+    BZ_stride0,
     Bias_ptr,
     Bias_stride0,
     Bias_stride1,
@@ -59,10 +61,10 @@ def bias_proj_kernel(
     N: tl.constexpr,
     C_in: tl.constexpr,
     H: tl.constexpr,
-    EPS: tl.constexpr,
     IO_DTYPE: tl.constexpr,
     BLOCK_QK: tl.constexpr,
 ):
+    # X is the pre-normalized x̃ = LN(x); bias[h,q,k] = Σ_c x̃[q,k,c]·WZ[h,c] + BZ[h].
     # Grid is (qk_blocks, H) so qk_blocks (large for big N) uses x dim,
     # avoiding the 65535 CUDA y-dim limit at N ≥ 1536 with small BLOCK_QK.
     pid_qk = tl.program_id(0)
@@ -82,18 +84,10 @@ def bias_proj_kernel(
     )
     X_fp32 = X_tile.to(tl.float32)
 
-    inv_C = 1.0 / C_in
-    mean = tl.sum(X_fp32, axis=-1) * inv_C
-    diff = X_fp32 - mean[:, None]
-    var = tl.sum(diff * diff, axis=-1) * inv_C
-    rstd = 1.0 / tl.sqrt(var + EPS)
-
     w_z = tl.load(WZ_ptr + pid_h * WZ_stride0 + c_offs * WZ_stride1)
-    sWZ_h = tl.load(sWZ_ptr + pid_h * sWZ_stride0)
-    BZc_h = tl.load(BZc_ptr + pid_h * BZc_stride0)
+    BZ_h = tl.load(BZ_ptr + pid_h * BZ_stride0)
 
-    bias_dot = tl.sum(X_fp32 * w_z[None, :], axis=-1)
-    bias = rstd * (bias_dot - mean * sWZ_h) + BZc_h
+    bias = tl.sum(X_fp32 * w_z[None, :], axis=-1) + BZ_h
 
     tl.store(
         Bias_ptr + pid_h * Bias_stride0 + q_idx * Bias_stride1 + k_idx * Bias_stride2,
@@ -115,9 +109,11 @@ def bias_proj_kernel(
         triton.Config({"BLOCK_M": 64, "BLOCK_K": 32}, num_warps=4, num_stages=2),
         triton.Config({"BLOCK_M": 64, "BLOCK_K": 64}, num_warps=4, num_stages=2),
         triton.Config({"BLOCK_M": 64, "BLOCK_K": 64}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_M": 64, "BLOCK_K": 64}, num_warps=4, num_stages=3),
         triton.Config({"BLOCK_M": 128, "BLOCK_K": 32}, num_warps=4, num_stages=2),
         triton.Config({"BLOCK_M": 128, "BLOCK_K": 64}, num_warps=8, num_stages=2),
         triton.Config({"BLOCK_M": 128, "BLOCK_K": 32}, num_warps=8, num_stages=2),
+        triton.Config({"BLOCK_M": 128, "BLOCK_K": 64}, num_warps=8, num_stages=3),
     ],
     key=["N", "C_in", "H", "D"],
 )
@@ -133,18 +129,6 @@ def triangle_attn_kernel(
     WKV_ptr,
     WKV_stride0,
     WKV_stride1,  # (C_in, 2*H*D) feature-interleaved per head
-    sWQ_ptr,
-    sWQ_stride0,
-    sWK_ptr,
-    sWK_stride0,
-    sWV_ptr,
-    sWV_stride0,
-    BQc_ptr,
-    BQc_stride0,
-    BKc_ptr,
-    BKc_stride0,
-    BVc_ptr,
-    BVc_stride0,
     Bias_ptr,
     Bias_stride0,
     Bias_stride1,
@@ -161,13 +145,13 @@ def triangle_attn_kernel(
     H: tl.constexpr,
     D: tl.constexpr,
     SCALE: tl.constexpr,
-    EPS: tl.constexpr,
     NEG_INF: tl.constexpr,
     HAS_MASK: tl.constexpr,
     IO_DTYPE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
+    # X is the pre-normalized x̃ = LN(x); Q/K/V are plain projections of x̃.
     pid_n = tl.program_id(0)
     pid_h = tl.program_id(1)
     pid_m = tl.program_id(2)
@@ -179,31 +163,17 @@ def triangle_attn_kernel(
     head_col = pid_h * D + d_offs
     q_mask = q_offs < N
 
-    inv_C = 1.0 / C_in
-
     X_q = tl.load(
         X_ptr + pid_n * X_stride0 + q_offs[:, None] * X_stride1 + c_offs[None, :] * X_stride2,
         mask=q_mask[:, None],
         other=0.0,
     )
-    X_q_fp32 = X_q.to(tl.float32)
-    mean_q = tl.sum(X_q_fp32, axis=-1) * inv_C
-    diff_q = X_q_fp32 - mean_q[:, None]
-    var_q = tl.sum(diff_q * diff_q, axis=-1) * inv_C
-    rstd_q = 1.0 / tl.sqrt(var_q + EPS)
 
     WQ_h = tl.load(WQ_ptr + c_offs[:, None] * WQ_stride0 + head_col[None, :] * WQ_stride1)
     WKV_h = tl.load(WKV_ptr + c_offs[:, None] * WKV_stride0 + kv_cols[None, :] * WKV_stride1)
-    sWQ_h = tl.load(sWQ_ptr + head_col * sWQ_stride0)
-    sWK_h = tl.load(sWK_ptr + head_col * sWK_stride0)
-    sWV_h = tl.load(sWV_ptr + head_col * sWV_stride0)
-    BQc_h = tl.load(BQc_ptr + head_col * BQc_stride0)
-    BKc_h = tl.load(BKc_ptr + head_col * BKc_stride0)
-    BVc_h = tl.load(BVc_ptr + head_col * BVc_stride0)
 
     Q_acc = tl.dot(X_q, WQ_h)
-    Q = rstd_q[:, None] * (Q_acc - mean_q[:, None] * sWQ_h[None, :]) + BQc_h[None, :]
-    Q_scaled = (Q * SCALE).to(IO_DTYPE)
+    Q_scaled = (Q_acc * SCALE).to(IO_DTYPE)
 
     m_i = tl.full((BLOCK_M,), -float("inf"), dtype=tl.float32)
     l_i = tl.zeros((BLOCK_M,), dtype=tl.float32)
@@ -218,17 +188,12 @@ def triangle_attn_kernel(
             mask=k_mask[:, None],
             other=0.0,
         )
-        X_k_fp32 = X_k.to(tl.float32)
-        mean_k = tl.sum(X_k_fp32, axis=-1) * inv_C
-        diff_k = X_k_fp32 - mean_k[:, None]
-        var_k = tl.sum(diff_k * diff_k, axis=-1) * inv_C
-        rstd_k = 1.0 / tl.sqrt(var_k + EPS)
 
         KV_acc = tl.dot(X_k, WKV_h)  # (BLOCK_K, 2*D)
         KV_3d = tl.reshape(KV_acc, (BLOCK_K, D, 2))
         K_acc, V_acc = tl.split(KV_3d)  # each (BLOCK_K, D)
-        K_block = (rstd_k[:, None] * (K_acc - mean_k[:, None] * sWK_h[None, :]) + BKc_h[None, :]).to(IO_DTYPE)
-        V_block = (rstd_k[:, None] * (V_acc - mean_k[:, None] * sWV_h[None, :]) + BVc_h[None, :]).to(IO_DTYPE)
+        K_block = K_acc.to(IO_DTYPE)
+        V_block = V_acc.to(IO_DTYPE)
 
         S = tl.dot(Q_scaled, tl.trans(K_block)).to(tl.float32)
 
@@ -266,49 +231,40 @@ def triangle_attn_kernel(
 
 
 def triangle_attn_forward(
-    X,
+    X_ln,
     WQ_c,
-    sWQ,
-    BQ_const,
     WKV_c,
-    sWK,
-    sWV,
-    BK_const,
-    BV_const,
     WZ_c,
-    sWZ,
-    BZ_const,
+    BZ,
     out,
     scale=1.0,
-    eps=1e-5,
     mask=None,
     Bias_buf=None,
 ):
-    """Launch bias_proj_kernel + triangle_attn_kernel; write into out (N, N, H*D)."""
-    N, N2, C_in = X.shape
+    """Launch bias_proj_kernel + triangle_attn_kernel; write into out (N, N, H*D).
+    X_ln is the pre-normalized x̃ = LN(x); the kernels read it directly (no LN)."""
+    N, N2, C_in = X_ln.shape
     assert N == N2
-    H = sWZ.shape[0]
+    H = WZ_c.shape[0]
     D = WQ_c.shape[1] // H
     assert WKV_c.shape == (C_in, 2 * H * D)
     assert out.shape == (N, N, H * D)
 
-    io_dtype = tl_io_dtype(X.dtype)
+    io_dtype = tl_io_dtype(X_ln.dtype)
     if Bias_buf is None:
-        Bias_buf = torch.empty(H, N, N, device=X.device, dtype=X.dtype)
+        Bias_buf = torch.empty(H, N, N, device=X_ln.device, dtype=X_ln.dtype)
 
     grid_b = lambda meta: (triton.cdiv(N * N, meta["BLOCK_QK"]), H)
     bias_proj_kernel[grid_b](
-        X,
-        X.stride(0),
-        X.stride(1),
-        X.stride(2),
+        X_ln,
+        X_ln.stride(0),
+        X_ln.stride(1),
+        X_ln.stride(2),
         WZ_c,
         WZ_c.stride(0),
         WZ_c.stride(1),
-        sWZ,
-        sWZ.stride(0),
-        BZ_const,
-        BZ_const.stride(0),
+        BZ,
+        BZ.stride(0),
         Bias_buf,
         Bias_buf.stride(0),
         Bias_buf.stride(1),
@@ -316,7 +272,6 @@ def triangle_attn_forward(
         N=N,
         C_in=C_in,
         H=H,
-        EPS=eps,
         IO_DTYPE=io_dtype,
     )
 
@@ -329,32 +284,20 @@ def triangle_attn_forward(
             mask_i8.stride(1),
         )
     else:
-        mask_ptr, mask_stride0, mask_stride1 = X, 0, 0
+        mask_ptr, mask_stride0, mask_stride1 = X_ln, 0, 0
 
     grid_a = lambda meta: (N, H, triton.cdiv(N, meta["BLOCK_M"]))
     triangle_attn_kernel[grid_a](
-        X,
-        X.stride(0),
-        X.stride(1),
-        X.stride(2),
+        X_ln,
+        X_ln.stride(0),
+        X_ln.stride(1),
+        X_ln.stride(2),
         WQ_c,
         WQ_c.stride(0),
         WQ_c.stride(1),
         WKV_c,
         WKV_c.stride(0),
         WKV_c.stride(1),
-        sWQ,
-        sWQ.stride(0),
-        sWK,
-        sWK.stride(0),
-        sWV,
-        sWV.stride(0),
-        BQ_const,
-        BQ_const.stride(0),
-        BK_const,
-        BK_const.stride(0),
-        BV_const,
-        BV_const.stride(0),
         Bias_buf,
         Bias_buf.stride(0),
         Bias_buf.stride(1),
@@ -371,9 +314,140 @@ def triangle_attn_forward(
         H=H,
         D=D,
         SCALE=scale,
-        EPS=eps,
         NEG_INF=-1e9,
         HAS_MASK=has_mask,
         IO_DTYPE=io_dtype,
+    )
+    return out
+
+
+# ===========================================================================
+# Kernel 3: fused gate epilogue  —  Out = (O * sigmoid(g_in @ Wg)) @ Wo
+# Shared by triangle-attn wrap-up AND attention-pair-bias (trunk). The ONLY
+# difference is how O is read (STRIDED_O constexpr):
+#   STRIDED_O=True  : triangle wrap-up — O is (N, N, H, D), non-contiguous.
+#                     decode row m -> (n1, n2), col c -> (h, d); gather at strides.
+#   STRIDED_O=False : apb — O is (M, C) contiguous; read m*C + c directly.
+# Everything else (g_in read, both matmuls, sigmoid, multiply, store) is shared.
+# Compile-time branch -> two specialized kernels, zero runtime cost.
+# ===========================================================================
+@triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_M": bm}, num_warps=w, num_stages=s)
+        for bm in (64, 128, 256, 512)
+        for w in (4, 8)
+        for s in (2, 3)
+    ],
+    key=["M", "C"],
+)
+@triton.jit
+def fused_gate_kernel(
+    O_ptr,
+    O_sN1,
+    O_sN2,
+    O_sH,
+    O_sD,  # strided-O args (used iff STRIDED_O)
+    GIN_ptr,  # gate input (M, C) contiguous: LN(x) [tri] or ã [apb]
+    WG_ptr,
+    WO_ptr,  # (C, C) matmul-convention (already transposed)
+    Out_ptr,  # (M, C) contiguous output
+    M,
+    N,  # N used iff STRIDED_O
+    C: tl.constexpr,
+    D: tl.constexpr,
+    STRIDED_O: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    rows = pid * BLOCK_M + tl.arange(0, BLOCK_M)
+    rmask = rows < M
+    cols = tl.arange(0, C)
+
+    if STRIDED_O:  # triangle wrap-up: O = (N, N, H, D), non-contiguous
+        n1 = rows // N
+        n2 = rows % N
+        h = cols // D
+        d = cols % D
+        o_off = (n1[:, None] * O_sN1 + n2[:, None] * O_sN2) + (h[None, :] * O_sH + d[None, :] * O_sD)
+        o = tl.load(O_ptr + o_off, mask=rmask[:, None], other=0.0)
+    else:  # apb: O = (M, C) contiguous
+        o = tl.load(O_ptr + rows[:, None] * C + cols[None, :], mask=rmask[:, None], other=0.0)
+
+    gin = tl.load(GIN_ptr + rows[:, None] * C + cols[None, :], mask=rmask[:, None], other=0.0)
+    wg = tl.load(WG_ptr + cols[:, None] * C + cols[None, :])
+    wo = tl.load(WO_ptr + cols[:, None] * C + cols[None, :])
+
+    g = tl.sigmoid(tl.dot(gin, wg))  # gate = sigmoid(g_in @ Wg)
+    acc = tl.dot((o.to(tl.float32) * g).to(gin.dtype), wo)  # (O * g) @ Wo
+    tl.store(Out_ptr + rows[:, None] * C + cols[None, :], acc.to(gin.dtype), mask=rmask[:, None])
+
+
+def fused_gate_forward(o_attn, qx_ln, WG, WO):
+    """Triangle wrap-up (STRIDED_O=True): Out = (o_attn * sigmoid(qx_ln @ Wg)) @ Wo.
+
+    o_attn : (N, N, H, D)  attention output (any strides — gathered at native strides)
+    qx_ln  : (N, N, C)     = LN(x), contiguous  (K-Fold gates on q_x = LN(x))
+    WG, WO : (out, in)     K-Fold linear_g / linear_o weights; transposed to (in, out)
+    returns: (N, N, C)     contiguous
+    """
+    N1, N2, H, D = o_attn.shape
+    N, C, M = N1, H * D, N1 * N2
+    out = torch.empty(N1, N2, C, device=o_attn.device, dtype=o_attn.dtype)
+    Qf = qx_ln.reshape(M, C)  # free view (contiguous)
+    Of = out.reshape(M, C)  # free view (contiguous)
+    wg = WG.t().contiguous()  # (out,in) -> (in,out) so qx @ wg == linear_g(qx)
+    wo = WO.t().contiguous()
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]),)
+    fused_gate_kernel[grid](
+        o_attn,
+        o_attn.stride(0),
+        o_attn.stride(1),
+        o_attn.stride(2),
+        o_attn.stride(3),
+        Qf,
+        wg,
+        wo,
+        Of,
+        M,
+        N,
+        C=C,
+        D=D,
+        STRIDED_O=True,
+    )
+    return out
+
+
+def apb_gate_forward(o_in, gate_in, WG, WO):
+    """Attention-pair-bias gate epilogue (STRIDED_O=False, contiguous O):
+        Out = (o_in * sigmoid(gate_in @ Wg)) @ Wo.
+
+    o_in, gate_in : (..., C) contiguous  (gate_in = ã, the normed single rep)
+    WG, WO        : (out, in)  K-Fold linear_g / linear_out weights; transposed to (in, out)
+    returns       : same shape as o_in, contiguous.  (trunk apb only — no single-cond gate)
+    """
+    C = o_in.shape[-1]
+    M = o_in.numel() // C
+    out = torch.empty_like(o_in)
+    Of = o_in.reshape(M, C)
+    Gf = gate_in.reshape(M, C)
+    Outf = out.reshape(M, C)
+    wg = WG.t().contiguous()
+    wo = WO.t().contiguous()
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]),)
+    fused_gate_kernel[grid](
+        Of,
+        0,
+        0,
+        0,
+        0,  # strided-O args unused (STRIDED_O=False)
+        Gf,
+        wg,
+        wo,
+        Outf,
+        M,
+        0,
+        C=C,
+        D=1,
+        STRIDED_O=False,
     )
     return out

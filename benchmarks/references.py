@@ -94,19 +94,24 @@ def cueq_triangle_attention(
     k = (xln @ WK).view(N, N, H, D).permute(0, 2, 1, 3).contiguous()
     v = (xln @ WV).view(N, N, H, D).permute(0, 2, 1, 3).contiguous()
     bp = (xln @ W_proj_z + B_proj_z).permute(2, 0, 1).unsqueeze(0)  # (1, H, N, N)
+    # mask is (N, N) pair-level (per-row key mask); cuequiv broadcasts it over heads
+    # & queries via (B=1, N_row, 1, 1, N_key) — additive -inf inside the kernel.
+    m = None if mask is None else mask.bool().view(1, N, 1, 1, N)
     out = cueq_tri(
         q.unsqueeze(0),
         k.unsqueeze(0),
         v.unsqueeze(0),
         bp.unsqueeze(0),
-        mask=None,
+        mask=m,
         scale=scale,
     )
     if isinstance(out, tuple):
         out = out[0]
     out = out.squeeze(0) if out.dim() == 5 else out
     o = out.permute(0, 2, 1, 3).reshape(N, N, H * D).to(X.dtype)
-    g = torch.sigmoid(F.linear(X, W_proj_g, B_proj_g)).view(N, N, H, D)
+    # K-Fold's MultiHeadAttention gates on q_x = LN(x), not raw x (cuequiv's
+    # triangle_attention kernel is core-only; the gate lives in K-Fold's torch wrapper).
+    g = torch.sigmoid(F.linear(xln.to(X.dtype), W_proj_g, B_proj_g)).view(N, N, H, D)
     o = (o.view(N, N, H, D) * g).reshape(N, N, H * D)
     return F.linear(o, W_proj_o, B_proj_o)
 
@@ -195,7 +200,7 @@ def torch_triangle_attention(
     if mask is not None:
         scores = scores + torch.where(mask.bool()[:, None, None, :], 0.0, -1e9)
     o = torch.matmul(torch.softmax(scores, -1), v).permute(0, 2, 1, 3).reshape(N, N, H * D)
-    g = torch.sigmoid(F.linear(X, W_proj_g, B_proj_g)).view(N, N, H, D)
+    g = torch.sigmoid(F.linear(xln, W_proj_g, B_proj_g)).view(N, N, H, D)  # gate on LN(x)
     o = (o.view(N, N, H, D) * g).reshape(N, N, H * D)
     return F.linear(o, W_proj_o, B_proj_o)
 
@@ -214,3 +219,59 @@ def torch_triangle_multiplicative_update(x, *, direction, mask=None, eps=1e-5, *
         y = torch.einsum("bkid,bkjd->bijd", a, b)
     yln = F.layer_norm(y, y.shape[-1:], w["norm_out_weight"], w["norm_out_bias"], eps=eps)
     return F.linear(yln, w["p_out_weight"]) * F.linear(x_in, w["g_out_weight"]).sigmoid()
+
+
+def torch_attn_pair_bias_qknorm(
+    X,
+    WQ,
+    b_q,
+    WK,
+    WV,
+    Z,
+    W_ln,
+    B_ln,
+    W_proj_z,
+    B_proj_z,
+    W_proj_g,
+    W_proj_o,
+    H,
+    D,
+    *,
+    qkn_w_q=None,
+    qkn_b_q=None,
+    qkn_w_k=None,
+    qkn_b_k=None,
+    key_mask=None,
+    scale=1.0,
+    eps=1e-5,
+):
+    """K-Fold attention-pair-bias WITH optional Q-bias and cross-head qk_norm.
+
+    Extends torch_attn_pair_bias with:
+      * a Q-projection bias `b_q` (K,V are bias-free), and
+      * qk_norm = a LayerNorm over the FULL H*D channel applied to Q and K *before*
+        the head split (matches transformers.py AttentionPairBias, use_qk_norm=True:
+        Linear -> LayerNorm(channel_a) -> head-split). Full LayerNorm: mean-center +
+        var + eps + affine (gamma, beta). When qkn_* are None, no qk_norm.
+
+    Weights are matmul-convention (in, out). Gate/output projections are bias-free
+    (K-Fold linear_g / linear_out are LinearNoBias). Returns (M, H*D).
+    """
+    M, _Cs = X.shape  # _Cs = H*D input channel
+    Cz = Z.shape[-1]
+    q = X @ WQ + b_q  # (M, H*D)
+    k = X @ WK  # (M, H*D)
+    v = X @ WV  # (M, H*D)
+    if qkn_w_q is not None:  # cross-head LayerNorm over H*D, BEFORE head split
+        q = F.layer_norm(q, (H * D,), qkn_w_q, qkn_b_q, eps=eps)
+        k = F.layer_norm(k, (H * D,), qkn_w_k, qkn_b_k, eps=eps)
+    q = q.view(M, H, D).permute(1, 0, 2)  # (H, M, D)
+    k = k.view(M, H, D).permute(1, 0, 2)
+    v = v.view(M, H, D).permute(1, 0, 2)
+    bp = (F.layer_norm(Z, (Cz,), W_ln, B_ln, eps=eps) @ W_proj_z + B_proj_z).permute(2, 0, 1)
+    scores = torch.matmul(q * scale, k.transpose(-1, -2)) + bp
+    if key_mask is not None:  # mask padded KEY positions (..,Lk) -> -inf (keep scores' dtype)
+        scores = scores.masked_fill(~key_mask.bool()[None, None, :], float("-inf"))
+    o = torch.matmul(torch.softmax(scores, -1), v).permute(1, 0, 2).reshape(M, H * D)
+    g = torch.sigmoid(F.linear(X, W_proj_g))
+    return F.linear(g * o, W_proj_o)

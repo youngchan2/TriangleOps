@@ -1,14 +1,14 @@
 import pytest
 import torch
-from conftest import TOL, ref_attn_pair_bias, requires_cuda, rnd
+from conftest import TOL, ref_attn_pair_bias, requires_cuda, requires_cueq, rnd
 
 import triangle_ops
 
 
-@requires_cuda
+@requires_cueq
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("M", [128, 256, 512])
-def test_matches_fp32_reference(device, dtype, M):
+def test_matches_cuequiv(device, dtype, M):
     H, D, Cz = 4, 32, 128
     N = H * D
     X = rnd(M, N, dtype=dtype, device=device, seed=1)
@@ -94,7 +94,7 @@ def test_precompute_forward_matches_oneshot(device):
     assert torch.equal(out_amortized, out_oneshot)
 
 
-@requires_cuda
+@requires_cueq
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("M", [256, 512])
 def test_general_affine_and_bias(device, dtype, M):

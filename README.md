@@ -6,12 +6,14 @@ beat NVIDIA [`cuequivariance`](https://github.com/NVIDIA/cuEquivariance) on H100
 | op | fused scope | speedup vs cuequivariance (H100, bf16) |
 |----|-------------|----------------------------------------|
 | `attention_pair_bias` | QKV proj + LN(Z) + bias proj + attention | **1.7–4.1×** across all M (128–2048) |
-| `triangle_multiplicative_update` | LN + gated proj + triangular einsum + gated proj | **1.2–2.5×** across all L (128–2048) |
-| `triangle_attention` | LN + Q/K/V proj + bias proj + attention | **up to 1.7×** for N ≤ 384, cuequiv's compiled attention kernel wins from N ≈ 768 |
+| `triangle_multiplicative_update` | LN + linear + gated proj | **1.2–2.5×** across all L (128–2048) |
+| `triangle_attention` | Q/K/V proj + bias proj + attention + gate (reads pre-normalized x̃) | **1.3–2.0×** across all N (128–2048) |
 
-All three fold the LayerNorm affine in fp32, and their outputs **match cuequiv's own
-kernels** within bf16/fp16 rounding (bf16 max|Δ| ≈ 2e-2, cos > 0.99998) — correctness is
-tested against cuequiv as the ground truth, not a hand-written reference.
+`triangle_mul` and `attention_pair_bias` fold the LayerNorm affine into the next
+projection (fp32); `triangle_attention` instead computes `x̃ = LN(x)` once and shares it
+across its kernels. All outputs **match cuequiv's own kernels** within bf16/fp16 rounding
+(bf16 max|Δ| ≈ 2e-2, cos > 0.99998) — correctness is tested against cuequiv as the ground
+truth, not a hand-written reference.
 
 ## Benchmarks (H100 PCIe, bf16)
 
@@ -50,17 +52,18 @@ prepacking), not a per-call cost. Reproduce with
 
 | N | cueq (ms) | ours (ms) | speedup |
 |---|-----------|-----------|---------|
-| 128  | 0.314 | 0.179 | **1.75×** |
-| 256  | 0.542 | 0.464 | **1.17×** |
-| 512  | 2.625 | 2.755 | 0.95× |
-| 768  | 6.998 | 8.204 | 0.85× |
-| 1024 | 14.672 | 17.957 | 0.82× |
+| 128  | 0.296   | 0.147 | **2.01×** |
+| 256  | 0.545   | 0.318 | **1.72×** |
+| 512  | 2.608   | 1.793 | **1.45×** |
+| 768  | 6.895   | 5.360 | **1.29×** |
+| 1024 | 15.06   | 11.68 | **1.29×** |
+| 2048 | 118.95  | 84.35 | **1.41×** |
 
-→ wins for **N ≤ 384** (up to 1.7×), ≈parity at 512; from N ≈ 768 cuequiv's own compiled
-cuda attention kernel takes over (we materialize the bias separately, it fuses the bias
-inside the kernel). The gate now runs on `LN(x)` (matching K-Fold) via an extra torch
-LayerNorm pass — folding it into the attention kernel (which already LN's x) would recover
-the lost margin; see note below.
+→ faster at **every** size (1.3–2.0×), ~2× at small N and still 1.3–1.4× at large N —
+**no crossover**. (Earlier versions lost from N ≈ 768; moving LayerNorm out of the kernels
+— `x̃ = LN(x)` computed once and shared, so the kernels drop per-token Welford/LN-fold —
+recovered the large-N margin. The gate runs on `x̃` matching K-Fold. The row-shared bias
+is still materialized once; fusing it on-chip is the remaining headroom.)
 
 ## What's fused — vs cuequivariance
 
@@ -77,14 +80,16 @@ triangle_multiplicative_update
   ours    :  [ LN + gated proj ] [einsum] [ LN + gated proj ]       (3 launches)
 
 triangle_attention
-  cuequiv :  [LN] [Q/K/V proj] [bias proj] [attention] [gate+Wo]    (cuda binary; rest eager)
-  ours    :  [ LN+bias ] [ LN + Q/K/V + attention ]  [gate+Wo]      (2 Triton kernels + torch)
+  cuequiv :  [LN] [Q/K/V proj] [bias proj] [attention] [gate+Wo]    (cuDNN SDPA; rest eager)
+  ours    :  x̃=LN(x) → [ bias ] [ Q/K/V + attention ] [ gate+Wo ]   (LN once in torch; 3 Triton kernels)
 ```
 
-So: LN never gets its own kernel (folded into the next proj). `attention_pair_bias` inlines
-QKV + bias into the attention kernel (bias on-chip, 1 launch); `triangle_attention`
-materializes the row-shared bias once then fuses LN+Q/K/V+attention (2 launches — at large N cuequiv's own bias-fused attention kernel pulls ahead); the einsum
-(`triangle_mul`) stays cuBLAS in both.
+So: for `triangle_mul`/`attention_pair_bias` LN never gets its own kernel (folded into the
+next proj); `triangle_attention` computes `x̃ = LN(x)` once in torch and its kernels read it.
+`attention_pair_bias` inlines QKV + bias into the attention kernel (bias on-chip, 1 launch);
+`triangle_attention` materializes the row-shared bias once, then Q/K/V+attention, then a
+fused gate+Wo kernel (3 Triton launches, all reading x̃); the einsum (`triangle_mul`) stays
+cuBLAS in both.
 
 ## Layout
 
@@ -140,9 +145,12 @@ the projection weight (`_common/ln_absorption.py`):
 ```
 
 so the fused kernel produces (mean, var, projection) in one Welford pass — no separate
-LN kernel/buffer. Per-op kernel specifics are in each `kernel.py` docstring; the headline
-optimizations were: D-major einsum layout (triangle_mul/attn), bias materialized once
-(triangle_attn 2-launch), K/V concat + larger BLOCK_M (triangle_attn), and load-x-once
+LN kernel/buffer. **Used by `triangle_mul` and `attention_pair_bias`.** `triangle_attention`
+instead computes `x̃ = LN(x)` once outside and its kernels read it directly (no absorption,
+no per-token Welford) — this is what recovered its large-N speedup. Per-op kernel specifics
+are in each `kernel.py` docstring; the headline optimizations were: D-major einsum layout
+(triangle_mul), bias materialized once (`triangle_attention`, 3 launches: bias / Q·K·V+
+attention / gate+Wo), K/V concat + larger BLOCK_M (triangle_attn), and load-x-once
 internal-k-loop (triangle_mul Kernel A).
 
 ## Tests & benchmarks

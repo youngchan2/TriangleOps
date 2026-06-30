@@ -2,16 +2,16 @@ import math
 
 import pytest
 import torch
-from conftest import TOL, ref_triangle_attn, requires_cuda, rnd
+from conftest import TOL, ref_triangle_attn, requires_cueq, rnd
 
 import triangle_ops
 
 
-@requires_cuda
+@requires_cueq
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("N", [128, 130, 256])  # 130 exercises tail/non-pow2
 @pytest.mark.parametrize("masked", [False, True])
-def test_matches_fp32_reference(device, dtype, N, masked):
+def test_matches_cuequiv(device, dtype, N, masked):
     H, D, Cin = 4, 32, 128
     scale = 1.0 / math.sqrt(D)
     X = rnd(N, N, Cin, dtype=dtype, device=device, seed=1)
@@ -70,7 +70,7 @@ def test_matches_fp32_reference(device, dtype, N, masked):
     assert max_abs < TOL[dtype], f"N={N} dtype={dtype} masked={masked} max_abs={max_abs:.3e}"
 
 
-@requires_cuda
+@requires_cueq
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("masked", [False, True])
 def test_general_affine(device, dtype, masked):

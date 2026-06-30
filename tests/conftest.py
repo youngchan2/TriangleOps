@@ -1,10 +1,49 @@
-"""Shared test fixtures + pure-torch fp32 references (no cuequivariance dependency)."""
+"""Shared test fixtures + correctness ground truth = cuequivariance kernels.
+
+Correctness is checked against cuequivariance's OPTIMIZED kernels — the same ones
+K-Fold deploys — NOT a hand-written torch reference.  (An earlier torch reference
+silently re-encoded an implementation bug in the gate input — `σ(W_g·x)` on the
+raw x instead of `LN(x)` — so it could never catch that bug.  cuequiv is the
+authoritative reference; the cuequiv wrappers live in `benchmarks/references.py`.)
+
+Notes on the cuequiv ground truth per op:
+  * attn_pair_bias / triangle_mul : cuequiv exposes the WHOLE fused op (gate
+    included), so the comparison is end-to-end against cuequiv.
+  * triangle_attn : cuequiv's `triangle_attention` is the attention CORE only
+    (q,k,v,bias -> o).  LN / Q·K·V proj / gate / Wo live in K-Fold's torch wrapper
+    (`MultiHeadAttention`), which gates on q_x = LN(x).  The reference therefore
+    routes the core through cuequiv and mirrors K-Fold's torch epilogue exactly.
+"""
+
+import os
+import sys
 
 import pytest
 import torch
-import torch.nn.functional as F
+
+# the cuequiv-backed references live in the sibling `benchmarks` package
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+try:
+    import cuequivariance_torch  # noqa: F401  (cuequiv kernels are the ground truth)
+
+    from benchmarks.references import (
+        cueq_attn_pair_bias,
+        cueq_triangle_attention,
+        cueq_triangle_multiplicative_update,
+    )
+
+    _HAS_CUEQ = True
+    _CUEQ_ERR = None
+except Exception as exc:  # cuequivariance not installed in this env
+    _HAS_CUEQ = False
+    _CUEQ_ERR = repr(exc)
 
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+requires_cueq = pytest.mark.skipif(
+    not (torch.cuda.is_available() and _HAS_CUEQ),
+    reason=f"cuequivariance required for correctness ground truth ({_CUEQ_ERR})",
+)
 
 
 @pytest.fixture(scope="session")
@@ -19,96 +58,22 @@ def rnd(*shape, dtype, device, sd=0.05, seed=0):
     return torch.randn(*shape, generator=g, device=device, dtype=dtype) * sd
 
 
-# Per-dtype absolute tolerance vs fp32 reference (kernels measured well inside these).
+# Per-dtype absolute tolerance vs the cuequivariance kernel.  Both sides are
+# bf16/fp16 approximations of the same fp32 math; measured cross-kernel agreement
+# is well inside these (bf16 max|Δ| ~2e-2, fp16 ~4e-3, cos > 0.99998).
 TOL = {torch.bfloat16: 5e-2, torch.float16: 1e-2}
 
 
 # --------------------------------------------------------------------------- #
-# fp32 references (ground truth)
+# References — thin delegators to the cuequivariance kernels (ground truth)
 # --------------------------------------------------------------------------- #
-def ref_attn_pair_bias(
-    X,
-    WQ,
-    WK,
-    WV,
-    Z,
-    W_ln,
-    B_ln,
-    W_proj_z,
-    B_proj_z,
-    W_proj_g,
-    B_proj_g,
-    W_proj_o,
-    B_proj_o,
-    H,
-    D,
-    scale,
-    eps,
-):
-    M, N = X.shape
-    Cz = Z.shape[-1]
-    Xf = X.float()
-    q = (Xf @ WQ.float()).reshape(M, H, D).permute(1, 0, 2)
-    k = (Xf @ WK.float()).reshape(M, H, D).permute(1, 0, 2)
-    v = (Xf @ WV.float()).reshape(M, H, D).permute(1, 0, 2)
-    zln = F.layer_norm(Z.float(), (Cz,), W_ln.float(), B_ln.float(), eps=eps)
-    bp = (zln @ W_proj_z.float() + B_proj_z.float()).permute(2, 0, 1)
-    scores = torch.matmul(q * scale, k.transpose(-1, -2)) + bp
-    o = torch.matmul(torch.softmax(scores, -1), v).permute(1, 0, 2).reshape(M, N)
-    bg = None if B_proj_g is None else B_proj_g.float()
-    bo = None if B_proj_o is None else B_proj_o.float()
-    g = torch.sigmoid(F.linear(Xf, W_proj_g.float(), bg))
-    return F.linear(g * o, W_proj_o.float(), bo)
+def ref_attn_pair_bias(*args, **kwargs):
+    return cueq_attn_pair_bias(*args, **kwargs)
 
 
-def ref_triangle_attn(
-    X,
-    W_ln,
-    B_ln,
-    WQ,
-    WK,
-    WV,
-    W_proj_z,
-    B_proj_z,
-    W_proj_g,
-    B_proj_g,
-    W_proj_o,
-    B_proj_o,
-    H,
-    D,
-    scale,
-    eps,
-    mask,
-):
-    N = X.shape[0]
-    Cin = X.shape[-1]
-    xln = F.layer_norm(X.float(), (Cin,), W_ln.float(), B_ln.float(), eps=eps)
-    q = (xln @ WQ.float()).view(N, N, H, D).permute(0, 2, 1, 3)
-    k = (xln @ WK.float()).view(N, N, H, D).permute(0, 2, 1, 3)
-    v = (xln @ WV.float()).view(N, N, H, D).permute(0, 2, 1, 3)
-    bp = (xln @ W_proj_z.float() + B_proj_z.float()).permute(2, 0, 1).unsqueeze(0)
-    scores = torch.matmul(q * scale, k.transpose(-1, -2)) + bp
-    if mask is not None:
-        scores = scores + torch.where(mask.bool()[:, None, None, :], 0.0, -1e9)
-    o = torch.matmul(torch.softmax(scores, -1), v).permute(0, 2, 1, 3).reshape(N, N, H * D)
-    bg = None if B_proj_g is None else B_proj_g.float()
-    bo = None if B_proj_o is None else B_proj_o.float()
-    g = torch.sigmoid(F.linear(X.float(), W_proj_g.float(), bg)).view(N, N, H, D)
-    o = (o.view(N, N, H, D) * g).reshape(N, N, H * D)
-    return F.linear(o, W_proj_o.float(), bo)
+def ref_triangle_attn(*args, **kwargs):
+    return cueq_triangle_attention(*args, **kwargs)
 
 
 def ref_triangle_mul(x, mask, direction, eps, **w):
-    C = x.shape[-1]
-    xln = F.layer_norm(x.float(), (C,), w["norm_in_weight"].float(), w["norm_in_bias"].float(), eps=eps)
-    x_in = xln
-    g = F.linear(xln, w["p_in_weight"].float()) * F.linear(xln, w["g_in_weight"].float()).sigmoid()
-    if mask is not None:
-        g = g * mask.unsqueeze(-1).float()
-    a, b = torch.chunk(g, 2, dim=-1)
-    if direction == "outgoing":
-        y = torch.einsum("bikd,bjkd->bijd", a, b)
-    else:
-        y = torch.einsum("bkid,bkjd->bijd", a, b)
-    yln = F.layer_norm(y, y.shape[-1:], w["norm_out_weight"].float(), w["norm_out_bias"].float(), eps=eps)
-    return F.linear(yln, w["p_out_weight"].float()) * F.linear(x_in, w["g_out_weight"].float()).sigmoid()
+    return cueq_triangle_multiplicative_update(x, direction=direction, mask=mask, eps=eps, **w)
