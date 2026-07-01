@@ -50,10 +50,18 @@ def _wrap_up(x_gate_in, O_attn, W_proj_g, B_proj_g, W_proj_o, B_proj_o, H, D):
     return torch.nn.functional.linear(o, W_proj_o, B_proj_o)
 
 
-def forward(X, pre, *, mask=None, scale=1.0, eps=1e-5, W_proj_g, B_proj_g, W_proj_o, B_proj_o):
+def forward(X, pre, *, mask=None, scale=1.0, eps=1e-5, W_proj_g, B_proj_g, W_proj_o, B_proj_o, pad_to=32):
     """Per-call forward using precomputed weights `pre`.  X is (N, N, C_in);
     returns (N, N, C_in).  LN is computed ONCE as x̃ = LN(x) and shared by the
-    attention/bias kernels and the gate epilogue (no LN-absorption)."""
+    attention/bias kernels and the gate epilogue (no LN-absorption).
+
+    Shape robustness: triangle_attn_kernel is memory-stride-sensitive — an N that
+    is not a multiple of ~16 runs up to ~1.5x slower (the pair-row stride is N*C).
+    So the attention is run on N padded up to a multiple of `pad_to`, with the
+    padding KEYS masked out (padding query-rows are discarded on slice). The
+    gate+Wo epilogue works over the flat N*N and is shape-robust, so it stays on
+    the real N.  Set pad_to<=1 to disable.  Correctness is unchanged: padded keys
+    contribute nothing to the softmax and padded rows are sliced away."""
     assert B_proj_g is None and B_proj_o is None, (
         "fused gate path assumes bias-free linear_g / linear_o (K-Fold LinearNoBias)"
     )
@@ -63,20 +71,43 @@ def forward(X, pre, *, mask=None, scale=1.0, eps=1e-5, W_proj_g, B_proj_g, W_pro
     D = pre["WQ_c"].shape[1] // H
     # x̃ = LN(x) computed once and shared by the kernels and the gate.
     X_ln = torch.nn.functional.layer_norm(X, (C_in,), pre["W_ln"].to(X.dtype), pre["B_ln"].to(X.dtype), eps)
-    O_attn = torch.empty(N, N, H * D, device=X.device, dtype=X.dtype)
-    triangle_attn_forward(
-        X_ln,
-        pre["WQ_c"],
-        pre["WKV_c"],
-        pre["WZ_c"],
-        pre["BZ"],
-        O_attn,
-        scale=scale,
-        mask=mask,
-    )
+
+    Np = ((N + pad_to - 1) // pad_to) * pad_to if pad_to and pad_to > 1 else N
+    if Np != N:
+        # Pad both N dims with zeros; mask the padding keys (and rows, which are
+        # discarded).  This runs triangle_attn on the fast (multiple-of-pad_to) shape.
+        X_ln_k = torch.nn.functional.pad(X_ln, (0, 0, 0, Np - N, 0, Np - N))
+        if mask is None:
+            mask_k = torch.zeros(Np, Np, dtype=torch.bool, device=X.device)
+            mask_k[:, :N] = True
+        else:
+            mask_k = torch.nn.functional.pad(mask.bool(), (0, Np - N, 0, Np - N), value=False)
+        O_pad = torch.empty(Np, Np, H * D, device=X.device, dtype=X.dtype)
+        triangle_attn_forward(
+            X_ln_k,
+            pre["WQ_c"],
+            pre["WKV_c"],
+            pre["WZ_c"],
+            pre["BZ"],
+            O_pad,
+            scale=scale,
+            mask=mask_k,
+        )
+        O_attn = O_pad[:N, :N]  # strided view; fused_gate reads O at native strides
+    else:
+        O_attn = torch.empty(N, N, H * D, device=X.device, dtype=X.dtype)
+        triangle_attn_forward(
+            X_ln,
+            pre["WQ_c"],
+            pre["WKV_c"],
+            pre["WZ_c"],
+            pre["BZ"],
+            O_attn,
+            scale=scale,
+            mask=mask,
+        )
     # Gate epilogue (fused): K-Fold gates on q_x = LN(x), so reuse x̃ directly.
-    # fused_gate_forward allocates & returns Out (N, N, H*D); O_attn is contiguous
-    # here so the (N,N,H*D) -> (N,N,H,D) view is free.
+    # O_attn may be a strided (N,N,H*D) slice -> fused_gate_kernel gathers at strides.
     return fused_gate_forward(O_attn.view(N, N, H, D), X_ln, W_proj_g, W_proj_o)
 
 
