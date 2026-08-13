@@ -132,3 +132,61 @@ def test_general_affine(device, dtype, masked):
     )
     max_abs = (out.float() - ref).abs().max().item()
     assert max_abs < TOL[dtype], f"general-affine masked={masked} dtype={dtype} max_abs={max_abs:.3e}"
+
+
+@requires_cueq
+@pytest.mark.parametrize("masked", [False, True])
+def test_apo_d16_hopper_safe(device, masked):
+    """K-Fold Apo shape must stay on a memory-safe Triton path for D=16."""
+    dtype = torch.bfloat16
+    N, H, D, Cin = 33, 4, 16, 64
+    scale = 1.0 / math.sqrt(D)
+    X = rnd(N, N, Cin, dtype=dtype, device=device, seed=31)
+    W_ln = 1.0 + rnd(Cin, dtype=dtype, device=device, sd=0.2, seed=32)
+    B_ln = rnd(Cin, dtype=dtype, device=device, sd=0.1, seed=33)
+    WQ, WK, WV = (rnd(Cin, H * D, dtype=dtype, device=device, sd=Cin**-0.5, seed=s) for s in (34, 35, 36))
+    W_pz = rnd(Cin, H, dtype=dtype, device=device, sd=Cin**-0.5, seed=37)
+    B_pz = rnd(H, dtype=dtype, device=device, sd=0.1, seed=38)
+    W_pg = rnd(Cin, H * D, dtype=dtype, device=device, sd=Cin**-0.5, seed=39)
+    W_po = rnd(Cin, H * D, dtype=dtype, device=device, sd=(H * D) ** -0.5, seed=40)
+
+    mask = None
+    if masked:
+        gmask = torch.Generator(device=device).manual_seed(41)
+        mask = torch.rand(N, N, device=device, generator=gmask) > 0.2
+
+    pre = triangle_ops.triangle_attn.precompute(W_ln, B_ln, WQ, WK, WV, W_pz, B_pz, H, D)
+    assert pre["WK_c"].data_ptr() != pre["WKV_c"].data_ptr()
+    out = triangle_ops.triangle_attn.forward(
+        X,
+        pre,
+        mask=mask,
+        scale=scale,
+        eps=1e-5,
+        W_proj_g=W_pg,
+        B_proj_g=None,
+        W_proj_o=W_po,
+        B_proj_o=None,
+    )
+    ref = ref_triangle_attn(
+        X,
+        W_ln,
+        B_ln,
+        WQ,
+        WK,
+        WV,
+        W_pz,
+        B_pz,
+        W_pg,
+        None,
+        W_po,
+        None,
+        H,
+        D,
+        scale=scale,
+        eps=1e-5,
+        mask=mask,
+    )
+    max_abs = (out.float() - ref).abs().max().item()
+    assert torch.isfinite(out).all()
+    assert max_abs < TOL[dtype], f"Apo D=16 masked={masked} max_abs={max_abs:.3e}"

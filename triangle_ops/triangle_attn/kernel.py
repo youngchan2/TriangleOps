@@ -10,9 +10,11 @@ SHARED across all N rows i.  A single fused launch would recompute it per row
 
   bias_proj_kernel     — materialize Bp (H, N, N) ONCE  (O(N²·H·C_in))
   triangle_attn_kernel — per (i, h, q_block): Q/K/V proj + FA-v2 with Bp
-                         as input.  K/V are produced by a SINGLE matmul through
-                         a feature-interleaved W_KV + tl.split, and BLOCK_M is
-                         allowed up to 128 to amortize K/V loads across queries.
+                         as input.  For D>=32, K/V are produced by a SINGLE
+                         matmul through a feature-interleaved W_KV + tl.split.
+                         D=16 uses separate K/V matmuls to avoid a Hopper
+                         reshape/split illegal-access issue.  BLOCK_M is allowed
+                         up to 128 to amortize K/V loads across queries.
 
 gate + Wo stay in PyTorch.  Fusion scope: Q/K/V proj + bias proj + attention
 (reading the shared x̃).
@@ -98,6 +100,12 @@ def bias_proj_kernel(
 
 # ===========================================================================
 # Kernel 2: triangle attention with K/V concat (+ tl.split)
+#
+# D=16 uses a separate-WK/WV specialization.  Triton's reshape/split lowering
+# for the interleaved (BLOCK_K, D, 2) accumulator is not memory-safe for that
+# shape on Hopper (it can fail during autotuning with an illegal memory access).
+# Keeping this as a constexpr branch preserves the existing D>=32 generated
+# kernel while giving the K-Fold Apo module a fully Triton implementation.
 # ===========================================================================
 @triton.autotune(
     configs=[
@@ -129,6 +137,12 @@ def triangle_attn_kernel(
     WKV_ptr,
     WKV_stride0,
     WKV_stride1,  # (C_in, 2*H*D) feature-interleaved per head
+    WK_ptr,
+    WK_stride0,
+    WK_stride1,  # (C_in, H*D), used iff SEPARATE_KV
+    WV_ptr,
+    WV_stride0,
+    WV_stride1,  # (C_in, H*D), used iff SEPARATE_KV
     Bias_ptr,
     Bias_stride0,
     Bias_stride1,
@@ -147,6 +161,7 @@ def triangle_attn_kernel(
     SCALE: tl.constexpr,
     NEG_INF: tl.constexpr,
     HAS_MASK: tl.constexpr,
+    SEPARATE_KV: tl.constexpr,
     IO_DTYPE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_K: tl.constexpr,
@@ -170,7 +185,11 @@ def triangle_attn_kernel(
     )
 
     WQ_h = tl.load(WQ_ptr + c_offs[:, None] * WQ_stride0 + head_col[None, :] * WQ_stride1)
-    WKV_h = tl.load(WKV_ptr + c_offs[:, None] * WKV_stride0 + kv_cols[None, :] * WKV_stride1)
+    if SEPARATE_KV:
+        WK_h = tl.load(WK_ptr + c_offs[:, None] * WK_stride0 + head_col[None, :] * WK_stride1)
+        WV_h = tl.load(WV_ptr + c_offs[:, None] * WV_stride0 + head_col[None, :] * WV_stride1)
+    else:
+        WKV_h = tl.load(WKV_ptr + c_offs[:, None] * WKV_stride0 + kv_cols[None, :] * WKV_stride1)
 
     Q_acc = tl.dot(X_q, WQ_h)
     Q_scaled = (Q_acc * SCALE).to(IO_DTYPE)
@@ -189,9 +208,13 @@ def triangle_attn_kernel(
             other=0.0,
         )
 
-        KV_acc = tl.dot(X_k, WKV_h)  # (BLOCK_K, 2*D)
-        KV_3d = tl.reshape(KV_acc, (BLOCK_K, D, 2))
-        K_acc, V_acc = tl.split(KV_3d)  # each (BLOCK_K, D)
+        if SEPARATE_KV:
+            K_acc = tl.dot(X_k, WK_h)
+            V_acc = tl.dot(X_k, WV_h)
+        else:
+            KV_acc = tl.dot(X_k, WKV_h)  # (BLOCK_K, 2*D)
+            KV_3d = tl.reshape(KV_acc, (BLOCK_K, D, 2))
+            K_acc, V_acc = tl.split(KV_3d)  # each (BLOCK_K, D)
         K_block = K_acc.to(IO_DTYPE)
         V_block = V_acc.to(IO_DTYPE)
 
@@ -240,6 +263,9 @@ def triangle_attn_forward(
     scale=1.0,
     mask=None,
     Bias_buf=None,
+    *,
+    WK_c=None,
+    WV_c=None,
 ):
     """Launch bias_proj_kernel + triangle_attn_kernel; write into out (N, N, H*D).
     X_ln is the pre-normalized x̃ = LN(x); the kernels read it directly (no LN)."""
@@ -249,6 +275,26 @@ def triangle_attn_forward(
     D = WQ_c.shape[1] // H
     assert WKV_c.shape == (C_in, 2 * H * D)
     assert out.shape == (N, N, H * D)
+
+    # The interleaved tl.reshape/tl.split path is retained unchanged for the
+    # tuned D>=32 cases.  D=16 is the K-Fold Apo-module configuration and uses
+    # separate projection matrices to avoid Hopper's illegal-access lowering.
+    separate_kv = D == 16
+    if separate_kv:
+        if WK_c is None or WV_c is None:
+            # Preserve the low-level public API: callers that only provide the
+            # historical interleaved WKV tensor are deinterleaved once here.
+            wkv_view = WKV_c.view(C_in, H, D, 2)
+            WK_c = wkv_view[..., 0].reshape(C_in, H * D).contiguous()
+            WV_c = wkv_view[..., 1].reshape(C_in, H * D).contiguous()
+        assert WK_c.shape == WV_c.shape == (C_in, H * D)
+        wk_ptr, wv_ptr = WK_c, WV_c
+        wk_stride0, wk_stride1 = WK_c.stride()
+        wv_stride0, wv_stride1 = WV_c.stride()
+    else:
+        # These pointers are compiled out when SEPARATE_KV=False.
+        wk_ptr = wv_ptr = WKV_c
+        wk_stride0 = wk_stride1 = wv_stride0 = wv_stride1 = 0
 
     io_dtype = tl_io_dtype(X_ln.dtype)
     if Bias_buf is None:
@@ -298,6 +344,12 @@ def triangle_attn_forward(
         WKV_c,
         WKV_c.stride(0),
         WKV_c.stride(1),
+        wk_ptr,
+        wk_stride0,
+        wk_stride1,
+        wv_ptr,
+        wv_stride0,
+        wv_stride1,
         Bias_buf,
         Bias_buf.stride(0),
         Bias_buf.stride(1),
@@ -316,6 +368,7 @@ def triangle_attn_forward(
         SCALE=scale,
         NEG_INF=-1e9,
         HAS_MASK=has_mask,
+        SEPARATE_KV=separate_kv,
         IO_DTYPE=io_dtype,
     )
     return out

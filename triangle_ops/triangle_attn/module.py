@@ -21,6 +21,12 @@ def precompute(W_ln, B_ln, WQ, WK, WV, W_proj_z, B_proj_z, H, D):
     pre-normalized x̃.  Returns a dict consumed by `forward`."""
     WQ_c = WQ.contiguous()  # (C_in, H*D) matmul convention, no fold
     WKV_c = interleave_kv(WK, WV, H, D).contiguous()  # (C_in, 2*H*D), no fold
+    # Triton's reshape/split lowering used by the interleaved K/V fast path can
+    # issue an illegal access for the Apo-module shape D=16 on Hopper.  Keep the
+    # original K and V layouts as well so the kernel can select a genuine
+    # two-matmul Triton specialization for D=16.  D>=32 continues to use WKV_c.
+    WK_c = WK.contiguous() if D == 16 else None
+    WV_c = WV.contiguous() if D == 16 else None
     WZ_c = W_proj_z.t().contiguous()  # (C_in, H) -> (H, C_in) for the bias kernel
 
     # bias-proj bias as an (H,) fp32 tensor (K-Fold's bias-proj is LinearNoBias).
@@ -32,6 +38,8 @@ def precompute(W_ln, B_ln, WQ, WK, WV, W_proj_z, B_proj_z, H, D):
     return {
         "WQ_c": WQ_c,
         "WKV_c": WKV_c,
+        "WK_c": WK_c,
+        "WV_c": WV_c,
         "WZ_c": WZ_c,
         "BZ": BZ,
         # x̃ = LN(x) is computed once in `forward`; the kernels and the gate
@@ -70,7 +78,13 @@ def forward(X, pre, *, mask=None, scale=1.0, eps=1e-5, W_proj_g, B_proj_g, W_pro
     H = pre["WZ_c"].shape[0]
     D = pre["WQ_c"].shape[1] // H
     # x̃ = LN(x) computed once and shared by the kernels and the gate.
-    X_ln = torch.nn.functional.layer_norm(X, (C_in,), pre["W_ln"].to(X.dtype), pre["B_ln"].to(X.dtype), eps)
+    X_ln = torch.nn.functional.layer_norm(
+        X,
+        (C_in,),
+        pre["W_ln"].to(X.dtype),
+        pre["B_ln"].to(X.dtype) if pre["B_ln"] is not None else None,
+        eps,
+    )
 
     Np = ((N + pad_to - 1) // pad_to) * pad_to if pad_to and pad_to > 1 else N
     if Np != N:
@@ -92,6 +106,8 @@ def forward(X, pre, *, mask=None, scale=1.0, eps=1e-5, W_proj_g, B_proj_g, W_pro
             O_pad,
             scale=scale,
             mask=mask_k,
+            WK_c=pre["WK_c"],
+            WV_c=pre["WV_c"],
         )
         O_attn = O_pad[:N, :N]  # strided view; fused_gate reads O at native strides
     else:
@@ -105,6 +121,8 @@ def forward(X, pre, *, mask=None, scale=1.0, eps=1e-5, W_proj_g, B_proj_g, W_pro
             O_attn,
             scale=scale,
             mask=mask,
+            WK_c=pre["WK_c"],
+            WV_c=pre["WV_c"],
         )
     # Gate epilogue (fused): K-Fold gates on q_x = LN(x), so reuse x̃ directly.
     # O_attn may be a strided (N,N,H*D) slice -> fused_gate_kernel gathers at strides.
