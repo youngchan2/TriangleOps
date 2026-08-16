@@ -1,9 +1,10 @@
 """Public API for fused triangle attention (AlphaFold-3 starting/ending node).
 
-Fused scope: Q/K/V projection + bias projection + attention.  LN is NOT folded
-into the projections; instead x̃ = LN(x) is materialized ONCE outside the kernels
-and shared by the bias-proj, attention, and gate paths (mirrors cuequivariance).
-gate + Wo (K-Fold's MultiHeadAttention._wrap_up) stay in PyTorch.
+Fused scope: Q/K/V projection + bias projection + attention, plus the gate + Wo
+epilogue (K-Fold's MultiHeadAttention._wrap_up) as its own fused kernel.  LN is
+NOT folded into the projections; instead x̃ = LN(x) is materialized ONCE outside
+the kernels and shared by the bias-proj, attention, and gate paths (mirrors
+cuequivariance).
 
 Mask follows K-Fold semantics: a pair-level (N, N) bool, broadcast over heads &
 queries (each row i masks over its N key positions).
@@ -47,15 +48,6 @@ def precompute(W_ln, B_ln, WQ, WK, WV, W_proj_z, B_proj_z, H, D):
         "W_ln": W_ln,
         "B_ln": B_ln,
     }
-
-
-def _wrap_up(x_gate_in, O_attn, W_proj_g, B_proj_g, W_proj_o, B_proj_o, H, D):
-    """K-Fold MultiHeadAttention._wrap_up: gate(sigmoid linear) ⊙ O, then Wo."""
-    g = torch.sigmoid(torch.nn.functional.linear(x_gate_in, W_proj_g, B_proj_g))
-    g = g.view(g.shape[:-1] + (H, D))
-    o = O_attn.view(O_attn.shape[:-1] + (H, D)) * g
-    o = o.reshape(o.shape[:-2] + (H * D,))
-    return torch.nn.functional.linear(o, W_proj_o, B_proj_o)
 
 
 def forward(X, pre, *, mask=None, scale=1.0, eps=1e-5, W_proj_g, B_proj_g, W_proj_o, B_proj_o, pad_to=32):
