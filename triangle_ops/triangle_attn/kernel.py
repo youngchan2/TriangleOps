@@ -468,39 +468,3 @@ def fused_gate_forward(o_attn, qx_ln, WG, WO):
         STRIDED_O=True,
     )
     return out
-
-
-def apb_gate_forward(o_in, gate_in, WG, WO):
-    """Attention-pair-bias gate epilogue (STRIDED_O=False, contiguous O):
-        Out = (o_in * sigmoid(gate_in @ Wg)) @ Wo.
-
-    o_in, gate_in : (..., C) contiguous  (gate_in = ã, the normed single rep)
-    WG, WO        : (out, in)  K-Fold linear_g / linear_out weights; transposed to (in, out)
-    returns       : same shape as o_in, contiguous.  (trunk apb only — no single-cond gate)
-    """
-    C = o_in.shape[-1]
-    M = o_in.numel() // C
-    out = torch.empty_like(o_in)
-    Of = o_in.reshape(M, C)
-    Gf = gate_in.reshape(M, C)
-    Outf = out.reshape(M, C)
-    wg = WG.t().contiguous()
-    wo = WO.t().contiguous()
-    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M"]),)
-    fused_gate_kernel[grid](
-        Of,
-        0,
-        0,
-        0,
-        0,  # strided-O args unused (STRIDED_O=False)
-        Gf,
-        wg,
-        wo,
-        Outf,
-        M,
-        0,
-        C=C,
-        D=1,
-        STRIDED_O=False,
-    )
-    return out
